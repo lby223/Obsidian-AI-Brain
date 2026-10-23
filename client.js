@@ -48,17 +48,20 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 [data-ab-page]{display:flex;flex-direction:column;gap:16px;padding:2px 2px 8px;max-width:680px;}
-[data-ab-tabs]{display:flex;gap:4px;border-bottom:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));padding-bottom:0;}
-[data-ab-tab]{padding:8px 14px;font-size:13px;cursor:pointer;border:none;background:none;color:var(--dsw-alias-label-secondary,#c9ccd1);
+[data-ab-tabs]{display:flex;gap:4px;border-bottom:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));padding-bottom:0;margin-bottom:4px;}
+[data-ab-tab]{padding:9px 16px;font-size:13px;cursor:pointer;border:none;background:none;color:var(--dsw-alias-label-secondary,#c9ccd1);
   border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;}
 [data-ab-tab]:hover{color:inherit;}
 [data-ab-tab][data-active]{color:#3b82f6;border-bottom-color:#3b82f6;font-weight:600;}
-[data-ab-row]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+[data-ab-row]{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+[data-ab-row]+[data-ab-row]{margin-top:10px;}
 [data-ab-grow]{flex:1;min-width:0;}
-[data-ab-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-ab-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);
+  margin:18px 0 8px;text-transform:none;}
+[data-ab-h]:first-child{margin-top:2px;}
 [data-ab-label]{font-size:13px;}
-[data-ab-note]{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
-[data-ab-input]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;
+[data-ab-note]{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);margin-top:2px;}
+[data-ab-input]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;margin-top:5px;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-ab-input]:focus{outline:none;border-color:#3b82f6;}
@@ -68,15 +71,15 @@ window.__ModuleLoader__.load({
 [data-ab-btn]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.24));}
 [data-ab-btn][data-primary]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
 [data-ab-btn][disabled]{opacity:.5;cursor:default;}
-[data-ab-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;word-break:break-all;
+[data-ab-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;word-break:break-all;margin-top:10px;
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-ab-msg][data-warn]{color:#f59e0b;}
 [data-ab-msg][data-good]{color:#22c55e;}
-[data-ab-badge]{font-size:11px;padding:2px 7px;border-radius:6px;
+[data-ab-badge]{font-size:11px;padding:2px 8px;border-radius:6px;
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
 [data-ab-badge][data-live]{color:#22c55e;}
-[data-ab-pre]{margin:6px 0 0;padding:8px 9px;border-radius:8px;max-height:240px;overflow:auto;font-size:11px;
-  line-height:15px;white-space:pre-wrap;word-break:break-all;
+[data-ab-pre]{margin:10px 0 0;padding:10px 12px;border-radius:8px;max-height:320px;overflow:auto;font-size:11px;
+  line-height:16px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-layer-4,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
 /* ── 进度条 ── */
 [data-ab-progress]{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.18));overflow:hidden;flex:1;min-width:80px;}
@@ -137,7 +140,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
-      const [log, setLog] = React.useState(null)   // null = 未展开
+      const [log, setLog] = React.useState('')   // 默认展开（用户 m02314 要日志默认打开），'' = 还没读到
       // 输入框绑本地草稿，别直接绑 cfg（页面轮询会冲掉正在打的字）
       const [draft, setDraft] = React.useState(null)  // null = 还没从 cfg 初始化
       // B站 源状态
@@ -170,6 +173,18 @@ window.__ModuleLoader__.load({
         tick()
         const t = setInterval(tick, 5000)
         return () => { alive = false; clearInterval(t) }
+      }, [])
+
+      // 日志默认打开（m02314），初次加载就拉一次
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          try {
+            const r = await jget('/log')
+            if (alive) setLog(r && r.ok ? (r.text || '（日志是空的）') : '读不到日志')
+          } catch (e) { if (alive) setLog('读不到日志：' + String(e?.message ?? e)) }
+        })()
+        return () => { alive = false }
       }, [])
 
       const cfg = st?.config
@@ -225,7 +240,7 @@ window.__ModuleLoader__.load({
       }
 
       const onLog = async () => {
-        if (log !== null) { setLog(null); return }
+        if (log) { setLog(''); return }  // 非空 = 已展开，点一下收起
         setBusy('log')
         try {
           const r = await jget('/log')
@@ -323,9 +338,9 @@ window.__ModuleLoader__.load({
         h('div', { 'data-ab-row': '' },
           h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'review' || reviewing, onClick: onReview }, '现在复盘'),
           h('button', { 'data-ab-btn': '', disabled: busy === 'browse' || browsing, onClick: onBrowse }, '现在逛'),
-          h('button', { 'data-ab-btn': '', disabled: busy === 'log', onClick: onLog }, log !== null ? '收起日志' : '看日志')),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'log', onClick: onLog }, log ? '收起日志' : '看日志')),
 
-        log !== null ? h('pre', { 'data-ab-pre': '' }, log) : null,
+        log ? h('pre', { 'data-ab-pre': '' }, log) : null,
       )
 
       // ── 记忆页：库路径 + 每日复盘 + 复盘模型 ──
