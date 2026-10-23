@@ -17,7 +17,7 @@ const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -352,12 +352,14 @@ export function apply(ctx, config) {
     const cli = findDshCli()
     if (!cli) { log('逛互联网没跑：找不到 dsh cli'); return { ok: false, error: '找不到 dsh cli' } }
 
-    const mode = cfg.browseMode === 'kb' ? '贴近知识库内容做扩展学习（先 brain_search / brain_list 看库里有什么，再围绕它去逛）' : '自由逛，不做要求'
+    const mode = cfg.browseMode === 'kb' ? '贴近知识库内容做扩展学习（先看工作区里有没有知识库的说明/索引，再围绕它去逛）' : '自由逛，不做要求'
     const prompt = [
       '你是「AI 大脑」的逛互联网助手。请出去逛一圈，把对使用者未来有帮助的知识记下来。',
       `浏览偏好：${mode}`,
-      '要求：不要复制全文，消化后用自己的话记结论；用 brain_capture 把有用的结论、事实、工具、踩坑记进知识库。',
-      '逛 3-5 个相关主题就停，写一篇简短总结（今天逛了什么、记了什么）。',
+      '要求：不要复制全文，消化后用自己的话记结论；每篇笔记写成 Markdown 文件，',
+      '统一放到你工作目录下的 3.探索/ 子目录里（文件名要像“以后会怎么搜它”）。',
+      '有用的结论、事实、工具、踩坑都要记；写 3-5 篇就够，别灌水。',
+      '逛 3-5 个相关主题就停，最后写一篇简短的总结（今天逛了什么、记了什么、没逛成什么）。',
       cfg.browseEndTime ? `必须在 ${cfg.browseEndTime} 之前收尾停笔，不要恋战。` : '',
     ].filter(Boolean).join('\n')
 
@@ -371,6 +373,12 @@ export function apply(ctx, config) {
       env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
     })
     browseChild = child
+    // 逛开始前先记下 stateDir/3.探索 里已有的文件名，exit 时把新增的搬进知识库
+    const preExisting = new Set()
+    try {
+      const bd = join(stateDir, '3.探索')
+      if (existsSync(bd)) for (const f of readdirSync(bd)) preExisting.add(f)
+    } catch { /* 读不到就算了 */ }
     // cmd.exe 吐的中文报错是 GBK，按 UTF-8 写日志会变方块；先 UTF-8 解，出替换符就回退 GBK
     const toText = (buf) => {
       try {
@@ -386,6 +394,26 @@ export function apply(ctx, config) {
     child.on('exit', (code) => {
       browseChild = null
       log(`逛互联网结束（code=${code}）`)
+      // 把 headless 会话产出的笔记搬进知识库 3.探索/（宿主不受沙箱限制，能写知识库）
+      let moved = 0
+      try {
+        const srcDir = join(stateDir, '3.探索')
+        const dstDir = join(cfg.vaultPath, '3.探索')
+        if (existsSync(srcDir)) {
+          mkdirSync(dstDir, { recursive: true })
+          for (const f of readdirSync(srcDir)) {
+            if (!/\.md$/i.test(f)) continue
+            if (preExisting.has(f)) continue   // 只搬本次新产的，别重复搬历史
+            try {
+              renameSync(join(srcDir, f), join(dstDir, f))
+              moved++
+              log(`逛互联网笔记入知识库：3.探索/${f}`)
+            } catch (e) { log(`搬笔记 ${f} 失败：${e?.message ?? e}`) }
+          }
+        }
+      } catch (e) { log(`搬笔记时出错：${e?.message ?? e}`) }
+      if (moved) log(`逛互联网共 ${moved} 篇笔记写进知识库 3.探索/`)
+      else log('逛互联网结束：本次没有新增笔记落盘（可能没逛成、或笔记写在了别处）')
       bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
     })
     child.on('error', (e) => log(`逛互联网起不来：${e?.message ?? e}`))
