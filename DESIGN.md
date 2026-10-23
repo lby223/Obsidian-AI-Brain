@@ -72,6 +72,16 @@ ctx.inject(["systemPrompt"], (ctx) => {
 3. **每个字段都 `.extra('volatile', true)`**，否则写设置抛错。
 4. **不加 `.max(n)` 之类校验**（校验失败 → cordis 拒收 entry → 整条插件不激活）；范围钳制放代码里。
 
+**自定义设置页（client.js，2026-10-23 补）**：除了 DSH 原生那张自动渲染的表单，还加了一个更丰富的「AI 大脑」设置页（`client.js` 自注册浏览器 bundle，`slots.inject('settings.section')` 注入），做四件事：
+- 状态徽标（版本 / 库是否配置 / 模型是否配好 / 今天复盘没 / 逛没）
+- 核心配置表单（vaultPath + 复盘三件套 + 复盘时间 + 逛互联网开关/时间/偏好）
+- 「现在复盘」「现在逛」手动按钮
+- 日志查看（末尾 200 行，走 `/log`）
+
+配套 host 端新增接口：`/config`（GET/POST）、`/log`（GET）；`/status` 里也带完整 `config`（含 apiKey，本机同源回显用）。
+
+**配置读写的优先级（跟 bili-scroll 同款的「开关别弹回」问题）**：桌面版里 `ctx` 收到的 config 是挂载时快照、写进 `cordis.patch.yml` 的值不热刷新，若直接「宿主 config > config.json」对账，用户在面板里改的键会被宿主旧默认值压回（表现成开关自己弹回去）。解法：**凡是从插件面板保存过的键（记在 config.json 的 `_set` 里），一律以 config.json 为准**。
+
 **AI 逛互联网**：
 - 配置：`browseEnabled`、`browseTime`、`browseMode`（`off` = 不做要求 / `kb` = 贴近知识库扩展学习）。
 - 机制：到点 spawn 一个 headless DSH 会话（`ELECTRON_RUN_AS_NODE=1`），提示词让它按 `browseMode` 去逛、把有用结论 `brain_capture` 回来。
@@ -98,12 +108,13 @@ ctx.inject(["systemPrompt"], (ctx) => {
 ```
 package.json
 cordis.patch.yml
-index.js            # host 端入口（apply + Config + 工具 + 定时）
+index.js            # host 端入口（apply + Config + 工具 + 定时 + HTTP /config /log）
+client.js           # 浏览器端入口（自注册 bundle + settings.section 面板）
 lib/
   rules.mjs         # 注入的规则文本
   vault.mjs         # 库读写（fs 封装）
   llm.mjs           # OpenAI 兼容客户端
-  scheduler.mjs     # 定时器 + 复盘/逛互联网触发
+  review.mjs        # 每日复盘（读收件箱→调模型→写库→归档）
   hostdeps.mjs      # 桌面版依赖探测（schemastery/dsh-tools 拿不到就降级）
 scripts/install.py  # 复用旧 skill 的库结构部署脚本
 skills/obsidian-ai-brain/  # 保留：库模板 + install.py（旧 skill 资产）

@@ -112,9 +112,38 @@ export function apply(ctx, config) {
     return o
   }
 
+  // ⭐ 面板里保存过的键 = 以插件自己那份 config.json 为准（不会被 DSH 原生设置页的旧值压回）。
+  //    桌面版里 `ctx` 收到的 config 是挂载时快照、写进 cordis.patch.yml 的值不热刷新 ⇒
+  //    干脆「凡是从插件面板保存过的键，一律以 config.json 为准」，简单可靠。
+  let touchedKeys = (() => {
+    const raw = readJson(cfgFile, {})
+    if (Array.isArray(raw._set)) return new Set(raw._set)
+    return new Set(Object.keys(DEFAULTS).filter((k) => k in raw && JSON.stringify(raw[k]) !== JSON.stringify(DEFAULTS[k])))
+  })()
+
   const savedCfg = () => clampPatch(normalize(readJson(cfgFile, {}), { ...DEFAULTS }))
-  let cfg = savedCfg()
-  const refreshCfg = () => { cfg = savedCfg(); return cfg }
+  const loadCfg = () => {
+    const saved = savedCfg()
+    let out = { ...DEFAULTS }
+    // 宿主那份（schema 校验过、默认已填）当基线，再叠 config.json
+    try { out = normalize(config, out) } catch { /* 拿不到就默认 */ }
+    for (const k of Object.keys(DEFAULTS)) {
+      if (touchedKeys.has(k)) out[k] = saved[k]            // 面板存过 ⇒ 本地说了算
+      else if (saved[k] !== DEFAULTS[k]) out[k] = saved[k] // 本地显式设过（老数据）⇒ 也听本地
+    }
+    return clampPatch(out)
+  }
+  let cfg = loadCfg()
+  const refreshCfg = () => { cfg = loadCfg(); return cfg }
+
+  // ⭐ 落配置的唯一入口：写 config.json 并记下「这些键以面板为准」
+  const persistCfg = (patch) => {
+    const clean = clampPatch(patch)
+    for (const k of Object.keys(clean)) if (k in DEFAULTS) touchedKeys.add(k)
+    writeJson(cfgFile, { ...cfg, ...clean, _set: [...touchedKeys] })
+    Object.assign(cfg, normalize(clean, cfg))
+    return clean
+  }
 
   // ── 功能 A：注入规则 ──
   try {
@@ -359,13 +388,31 @@ export function apply(ctx, config) {
     if (sub === '/status' && req.method === 'GET') {
       refreshCfg()
       return sendJson(res, 200, {
-        ok: true, version: myVersion(),
+        ok: true, version: myVersion(), home: stateDir,
         vault: cfg.vaultPath || '',
         reviewEnabled: cfg.reviewEnabled, reviewTime: cfg.reviewTime,
         reviewedToday: reviewToday(), browseEnabled: cfg.browseEnabled, browseTime: cfg.browseTime,
         browseMode: cfg.browseMode, browsedToday: browseToday(),
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
+        config: { ...cfg }, // 完整配置（apiKey 也带，本机同源 fetch，设置页要回显）
       })
+    }
+    if (sub === '/config' && req.method === 'GET') {
+      refreshCfg()
+      return sendJson(res, 200, { ok: true, config: { ...cfg }, home: stateDir })
+    }
+    if (sub === '/config' && req.method === 'POST') {
+      const body = await readBody(req)
+      const patch = {}
+      for (const k of Object.keys(DEFAULTS)) if (k in body) patch[k] = body[k]
+      const clean = persistCfg(patch)
+      log(`设置已更新：${JSON.stringify(clean)}`)
+      return sendJson(res, 200, { ok: true, config: { ...cfg } })
+    }
+    if (sub === '/log' && req.method === 'GET') {
+      let text = ''
+      try { text = readFileSync(logFile, 'utf8').split('\n').slice(-200).join('\n') } catch { /* 没日志就给空 */ }
+      return sendJson(res, 200, { ok: true, text })
     }
     if (sub === '/review' && req.method === 'POST') return sendJson(res, 200, await doReview('manual'))
     if (sub === '/browse' && req.method === 'POST') return sendJson(res, 200, await doBrowse('manual'))
