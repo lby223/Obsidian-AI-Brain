@@ -1,0 +1,17 @@
+# 自测残留
+.selftest/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Obsidian 工作区状态（每台机器不同，别提交）
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.trash/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
