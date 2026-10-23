@@ -94,15 +94,28 @@ If the user says "记住这个" / "remember this," write it regardless of the ru
 
 ## Install
 
-Run the installer from the repo root:
+Installing takes two independent steps — the vault structure, then the skill itself. Doing only the first changes nothing about agent behaviour.
+
+**Step 1 — build the vault structure.** From the repo root:
 
 ```bash
-python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault"
+python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault" --dry-run   # plan only
+python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault" --agents-md
 ```
 
 It is idempotent: it creates the numbered folders, writes the starter notes only where nothing exists, and never overwrites an existing note (it backs up instead). `--vault` must be a path you have already created — the script does not invent one, so it cannot collide with an existing vault.
 
-Add `--agents-md` to also append a memory section to `~/.dsh/AGENTS.md` (or `--agents-path` for another agent convention, e.g. `~/.codex/AGENTS.md`). Without it, the skill alone does nothing — the rules only run if the agent reads them every session.
+`--agents-md` appends a memory section to `~/.dsh/AGENTS.md` (or `--agents-path` for another agent convention, e.g. `~/.codex/AGENTS.md`). **Without it, the skill alone does nothing** — the rules only run if the agent reads them every session.
+
+**Step 2 — put the skill where the agent finds it:**
+
+```bash
+cp -r skills/obsidian-ai-brain ~/.dsh/skills/
+```
+
+Verify: the skill name should appear in the agent's available-skills list in a new session. There is no UI, no toggle, and no version row — a skill is a folder the agent reads, not a plugin.
+
+If a user asks "it installed but nothing happened," check those two steps in that order, and check that nothing was nested one level too deep (`skills/obsidian-ai-brain/SKILL.md` is correct).
 
 ## Making it automatic
 

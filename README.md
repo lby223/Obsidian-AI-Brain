@@ -8,6 +8,138 @@
 
 ---
 
+## ⚠️ 先看这个：它不是 Obsidian 插件
+
+第一次打开这个仓库的人多半在找"安装"按钮和设置面板。**没有——因为它不是插件。**
+
+|  | Obsidian 插件 | 这个仓库（agent skill） |
+|---|---|---|
+| 谁加载它 | Obsidian | 你的 agent（DSH、Claude Code 等） |
+| 怎么配置 | 设置 → 第三方插件，有开关、版本号、设置页 | **没有界面**。就是一个文件夹，agent 去读里面的 `SKILL.md` |
+| 装在哪 | `<库>/.obsidian/plugins/<名字>/` | agent 的 skills 目录（DSH 是 `~/.dsh/skills/`） |
+| 装完后 Obsidian 里看到什么 | 插件列表多一行、设置里多一页 | **什么都没多**。多出来的是库里的目录和笔记 |
+| 怎么关掉 | 拨开关 | 删掉那个文件夹 |
+
+一句话：**插件是给 Obsidian 用的，skill 是给 agent 看的。** 两者不在同一个体系里，所以别在 Obsidian 的插件列表里找它。
+
+---
+
+## 30 秒判断适不适合你
+
+**适合**
+
+- 你在用支持 skills 的 agent（DSH、Claude Code 这类），而它老忘事
+- 你愿意让 agent 往一个 Obsidian 库里写笔记
+- 你已经有一个 Obsidian 库
+
+**不适合**
+
+- 你想要的是 Obsidian 笔记模板或插件 —— 这个不解决那类问题
+- 你不想让 agent 写你的库
+- 你希望装完就一劳永逸 —— 先读[位置要诚实说清](#位置要诚实说清)
+
+---
+
+## 5 分钟上手
+
+前置条件：一个**已经存在**的 Obsidian 库（脚本不会替你建库，也不会动别人的库），Python 3.8+。
+
+### 第 1 步：装库结构
+
+```bash
+git clone https://github.com/lby223/Obsidian-AI-Brain.git
+cd Obsidian-AI-Brain
+
+# 先干跑：只打印它打算写哪些文件，不落盘
+python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault" --dry-run
+
+# 看清了再真跑
+python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault" --agents-md
+```
+
+`--agents-md` 会把记忆规则追加到 `~/.dsh/AGENTS.md`（DSH 的全局规则文件，每个会话开局都会加载）。
+用别的 agent 约定就换 `--agents-path`，例如 `--agents-path ~/.codex/AGENTS.md`。
+
+> **`--agents-md` 这一步不能省。** 光装 skill 不生效——规则只有被 agent 每会话读到才会执行。
+
+**✅ 怎么确认这步成功了**：输出结尾有一行 `完成：新建 N 项，跳过 M 项`，然后打开 Obsidian，库里多出 7 个编号目录和 5 篇笔记。
+
+### 第 2 步：把 skill 交给 agent
+
+```bash
+cp -r skills/obsidian-ai-brain ~/.dsh/skills/
+```
+
+**✅ 怎么确认这步成功了**：开一个新会话，问 agent「你有哪些 skill」——列表里应该出现 `obsidian-ai-brain`。
+（DSH 实测：拷进去后技能列表当场就更新了，不需要重启。）
+
+### 第 3 步：没有了
+
+不用点"启用"，不用重启，没有配置项要填。接下来就是正常干活，它会自己在每轮结束时判断要不要记。
+
+---
+
+## 装完之后，你会看到什么
+
+**Obsidian 侧** —— 库里多出 7 个编号目录 + 5 篇笔记：
+
+```
+你的库/
+├── 0.导读.md
+├── 1.项目/            项目索引.md
+├── 2.领域/
+├── 3.自我/
+├── 4.AI手册/          AI操作手册.md
+├── 5.日记/
+├── 6.资料/            模板/ 附件/ 参考/
+└── 9.归档/            备份/
+        （每个目录归谁写，见下面「目录：一个编号 = 一个动作」）
+```
+
+**Agent 侧** —— 技能列表里多一条 `obsidian-ai-brain`；每轮任务结束时它会按规则判断要不要往 `2.领域/` 写东西。
+
+**你看不到的** —— 设置页、开关、"已启用"状态、版本号。这套东西没有 UI，唯一的观察窗口是库里的文件变化。
+
+---
+
+## 日常怎么用
+
+| 你想做的 | 怎么做 |
+|---|---|
+| 什么都不做 | 规则生效的话它自己会记。不生效见[位置要诚实说清](#位置要诚实说清) |
+| 强制它记一件事 | 直接说「记住这个：……」—— 明确要求优先于判断规则 |
+| 看它都记了什么 | 读 `2.领域/`，一篇一个主题。`1.项目/项目索引.md` 是总表 |
+| 让它别记某样东西 | 删掉那篇笔记，或在 `4.AI手册/AI操作手册.md` 里加一条禁令 |
+| 它记错了 | 直接改。是 Markdown，就是你自己的文件 |
+| 库里已经有几百篇旧笔记 | 能用，但先把 `0.导读.md` 和 `AI操作手册.md` 改成你自己的习惯，否则它按陌生规则乱写 |
+
+---
+
+## 出问题
+
+| 症状 | 原因 / 解法 |
+|---|---|
+| `--vault` 报错、退出码 2 | 库目录不存在。脚本**不建库**，先手动建一个 |
+| 装完 agent 完全没反应 | 漏了 `--agents-md`，或 agent 没读到规则。skill 只提供方法，不强制被调用 |
+| agent 说没有这个 skill | 没拷进 skills 目录，或层级多套了一层。必须是 `skills/obsidian-ai-brain/SKILL.md` |
+| 笔记里出现乱码 | Windows 上用 PowerShell 写 UTF-8 中文的经典坑。装库结构跑 Python 脚本，别手抄 |
+| 不想让 agent 碰某部分 | `3.自我/` 和 `5.日记/` 已规定只读不写；要更严就写进 `AI操作手册.md` |
+
+---
+
+## 卸载 / 回滚
+
+```bash
+rm -rf ~/.dsh/skills/obsidian-ai-brain        # 去掉 skill
+```
+
+- 库里的笔记**不会**被删 —— 它们本来就是你的 Markdown 文件，留着照常用。
+- `AGENTS.md` 里追加的那一节要手动删（脚本只负责追加，不管理删除）。
+- 被改过的 `.obsidian` 配置，备份都在 `<库>/9.归档/备份/`，想还原就从那儿取。
+- 想彻底还原 Obsidian 配置：`--dry-run` 会列出它管哪些文件（`app.json` / `daily-notes.json` / `templates.json`）。
+
+---
+
 ## 核心想法只有一个
 
 > **能迁移的才写。**
@@ -32,6 +164,46 @@
 **报错原文是承重墙。** 写"编码有问题"一文不值；下一个会话 grep 的是 `UnicodeDecodeError: 'gbk' codec can't decode byte`。把消息原文贴进去。
 
 其余一律不写：过程流水账、一次性调试、通用常识（那是搜索引擎的活）、用户原话（那是日记的活）、自己的推理草稿、进展汇报。
+
+---
+
+## 一篇真实的笔记长这样
+
+不用想象，四类知识的写法就长这样——注意**报错原文和根因占了正文大部分**：
+
+```markdown
+---
+title: PowerShell 写 UTF-8 中文文件出现乱码
+type: note
+date: 2026-10-23
+tags: [踩坑, 编码, windows]
+---
+
+# PowerShell 写 UTF-8 中文文件出现乱码
+
+> **一句话结论**：文件里出现 `璧勬枡` 这类怪字，通常是**读的时候**用错编码，文件本身没坏。
+
+## 症状
+
+`Get-Content -Raw app.json` 显示 `"attachmentFolderPath": "6.璧勬枡/闄勪欢"`。
+
+## 根因
+
+PowerShell 5.1 的 `Out-File` / `Set-Content` 默认用系统 ANSI 代码页（中文机器上是 GBK/936）；
+`Get-Content -Raw` 也拿同一个代码页去解码 UTF-8 字节，于是显示成那样。
+
+## 解法
+
+- 写文件交给 Python（`encoding="utf-8"`）或编辑器，别用 PowerShell 重定向。
+- 判断文件有没有真坏，看字节、别信控制台显示：
+  `[System.IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)`
+
+## 相关
+
+[[本机环境速查]]
+```
+
+前 8 行给结论、标题是真实检索词、单篇不到 2KB —— 这三条让下一个会话能用一次 grep 命中它。
 
 ---
 
@@ -67,30 +239,7 @@
 
 ---
 
-## 安装
-
-要求：已有 Obsidian 库（本脚本**不会自建库目录**，所以不可能撞上你已有的库）、Python 3.8+。
-
-```bash
-git clone https://github.com/lby223/Obsidian-AI-Brain.git
-cd Obsidian-AI-Brain
-
-# 先看计划
-python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault" --dry-run
-
-# 真正装
-python skills/obsidian-ai-brain/scripts/install.py --vault "C:/path/to/YourVault"
-```
-
-带上 `--agents-md` 会把记忆规则追加到 `~/.dsh/AGENTS.md`（DSH 的全局规则文件）；别的 agent 约定用 `--agents-path` 指定，例如 `~/.codex/AGENTS.md`。
-
-然后把 `skills/obsidian-ai-brain/` 整个目录放进你的 agent skills 目录（DSH 是 `~/.dsh/skills/`）：
-
-```bash
-cp -r skills/obsidian-ai-brain ~/.dsh/skills/
-```
-
-### 脚本干了什么
+## install.py 到底干了什么
 
 - 建 7 个编号目录 + 子目录（`1.项目/归档`、`6.资料/{模板,附件,参考}`、`9.归档/备份`）
 - 只在**不存在**时写入门笔记：`0.导读.md`、`1.项目/项目索引.md`、`4.AI手册/AI操作手册.md`、两个模板
@@ -98,7 +247,7 @@ cp -r skills/obsidian-ai-brain ~/.dsh/skills/
 - 改 `.obsidian` 配置前先备份到 `9.归档/备份/`：附件目录、日记目录与模板、模板目录、链接自动更新、忽略备份目录
 - 幂等：跑第二遍输出 `新建 0 项`
 
-三个自测都是实际跑过的：BOM 编码的配置能正确解析并合并（保留你原来的键）、用户改过的笔记不被覆盖、库目录不存在时退出码 2 拒绝执行、`--agents-md` 重复跑只追加一次。
+自测都是实际跑过的：BOM 编码的配置能正确解析并合并（保留你原来的键）、用户改过的笔记不被覆盖、库目录不存在时退出码 2 拒绝执行、`--agents-md` 重复跑只追加一次、在真实库上 `--dry-run` 只列计划不落盘。
 
 ---
 
@@ -107,6 +256,8 @@ cp -r skills/obsidian-ai-brain ~/.dsh/skills/
 **这个 skill 给你一个放记忆的好地方，和一条判断什么该放进去的清晰规则。**
 
 它**不保证** agent 一定读、一定写。skill 被调用是因为 agent 决定调用它——这是整条链上最软的一环。
+
+所以"安装了就能用吗"的准确回答是：**结构上立刻可用，行为上取决于 agent。** 库和规则装好了，但会不会真的记，得看它每轮有没有去判断。
 
 如果"agent 会记住"必须成为系统的属性、而不是 agent 自觉性的属性，那就需要另一套机制：**一个定时任务，每晚扫当天会话、自动提炼、写进库**。skill 做不到这件事。
 
