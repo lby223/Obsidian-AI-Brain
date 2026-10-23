@@ -236,6 +236,15 @@ window.__ModuleLoader__.load({
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
+      const onBiliBrowse = async () => {
+        setBusy('bilibrowse'); say('')
+        try {
+          const r = await jpost('/site/browse', { site: 'bili' })
+          if (r && r.ok) say('已经在后台逛 B站 了，笔记会落 3.探索/bili/，日志见下方「日志」', 'good')
+          else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
       if (!st || !cfg) {
         return h('div', { 'data-ab-page': '' },
           h('div', { 'data-ab-note': '' }, fails >= 3
@@ -327,7 +336,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-ab-grow': '' }),
           h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup', onClick: onBiliSetup }, '装 B站 环境'),
           biliLoggedIn
-            ? null
+            ? h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bilibrowse', onClick: onBiliBrowse }, '逛 B站')
             : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录')),
         biliQr
           ? h('div', { 'data-ab-row': '' },

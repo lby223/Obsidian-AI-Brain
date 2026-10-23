@@ -368,42 +368,131 @@ export function apply(ctx, config) {
   }
 
   const browseToday = () => readState().browsed?.[vault.dayKey()] === true
+  const siteBrowsedToday = (siteId) => readState().siteBrowsed?.[`${siteId}:${vault.dayKey()}`] === true
   let browseChild = null   // 当前在跑的逛互联网子进程（到结束时间要杀）
 
   const hmNow = () => { const n = new Date(); return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` }
 
-  const doBrowse = async (why = 'schedule') => {
+  // 写 headless-overlay.yml：把某个网站的 MCP 挂进 headless 会话 + 打开 credentials（headless 默认禁）
+  const ensureOverlay = (site) => {
+    const out = join(stateDir, 'headless-overlay.yml')
+    const lines = [
+      '# dsh-ai-brain 自动生成：逛网站时把 MCP 挂进 headless 会话',
+      '# 打开账号/授权/模型三件套（headless 默认禁用，不打开 MCP 拿不到 token）',
+      '- id: credentials',
+      '  disabled: false',
+      '- id: authorization',
+      '  disabled: false',
+      '- id: deepseek-account',
+      '  disabled: false',
+    ]
+    try {
+      const m = ctx?.get?.('agentDefaultModel')?.currentSelection?.()
+      if (m?.provider && m?.model) {
+        lines.push(`- id: agent-default-model`)
+        lines.push(`  config:`)
+        lines.push(`    provider: ${m.provider}`)
+        lines.push(`    model: ${m.model}`)
+        if (m.reasoningEffort) lines.push(`    reasoningEffort: ${m.reasoningEffort}`)
+      }
+    } catch { /* 拿不到就跳过 */ }
+
+    if (site?.id === 'bili') {
+      const py = cfg.biliPythonPath || (bili.venvReadyNow(stateDir)
+        ? (process.platform === 'win32' ? join(stateDir, '.venv', 'Scripts', 'python.exe') : join(stateDir, '.venv', 'bin', 'python'))
+        : 'python')
+      lines.push(`- insert:`)
+      lines.push(`    - id: mcp-bili-duty`)
+      lines.push(`      name: '@deepseek-ai/dsh-mcp-client'`)
+      lines.push(`      config:`)
+      lines.push(`        serverName: bili-duty`)
+      lines.push(`        transport: stdio`)
+      lines.push(`        command: ${py}`)
+      lines.push(`        args:`)
+      lines.push(`          - ${join(stateDir, 'mcp_server.py')}`)
+      lines.push(`        env:`)
+      lines.push(`          BILI_MCP_TOOLS: ${biliWhitelist().join(',')}`)
+      lines.push(`          PYTHONUTF8: '1'`)
+      lines.push(`        failOnStartupError: false`)
+    } else if (site?.transport === 'stdio') {
+      lines.push(`- insert:`)
+      lines.push(`    - id: mcp-site-${site.id}`)
+      lines.push(`      name: '@deepseek-ai/dsh-mcp-client'`)
+      lines.push(`      config:`)
+      lines.push(`        serverName: ${site.id}`)
+      lines.push(`        transport: stdio`)
+      lines.push(`        command: ${site.command}`)
+      if (Array.isArray(site.args) && site.args.length) {
+        lines.push(`        args:`)
+        for (const a of site.args) lines.push(`          - ${a}`)
+      }
+      if (site.env) {
+        lines.push(`        env:`)
+        for (const [k, v] of Object.entries(site.env)) lines.push(`          ${k}: ${v}`)
+      }
+      lines.push(`        failOnStartupError: false`)
+    } else if (site?.transport === 'streamable-http') {
+      lines.push(`- insert:`)
+      lines.push(`    - id: mcp-site-${site.id}`)
+      lines.push(`      name: '@deepseek-ai/dsh-mcp-client'`)
+      lines.push(`      config:`)
+      lines.push(`        serverName: ${site.id}`)
+      lines.push(`        transport: streamable-http`)
+      lines.push(`        url: ${site.url}`)
+      if (site.headers) {
+        lines.push(`        headers:`)
+        for (const [k, v] of Object.entries(site.headers)) lines.push(`          ${k}: ${v}`)
+      }
+      lines.push(`        failOnStartupError: false`)
+    }
+    try { writeFileSync(out, lines.join('\n') + '\n', 'utf8') } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`) }
+    return out
+  }
+
+  const doBrowse = async (why = 'schedule', site = null) => {
     refreshCfg()
     if (!cfg.browseEnabled) return { ok: false, error: '逛互联网没开' }
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
     const cli = findDshCli()
     if (!cli) { log('逛互联网没跑：找不到 dsh cli'); return { ok: false, error: '找不到 dsh cli' } }
 
+    // 逛指定网站 vs 自由逛
+    const siteDir = site ? site.id : '综合'
     const mode = cfg.browseMode === 'kb' ? '贴近知识库内容做扩展学习（先看工作区里有没有知识库的说明/索引，再围绕它去逛）' : '自由逛，不做要求'
+    const sitePrompt = site
+      ? `今天逛的是「${site.name}」这个网站源。你可以用 ${site.id === 'bili' ? 'bili_search / bili_subtitle / bili_comments / bili_video_info' : '这个网站提供的 MCP 工具'} 去搜、看内容，把对使用者有帮助的知识消化后记下来。`
+      : ''
     const prompt = [
       '你是「AI 大脑」的逛互联网助手。请出去逛一圈，把对使用者未来有帮助的知识记下来。',
       `浏览偏好：${mode}`,
+      sitePrompt,
       '要求：不要复制全文，消化后用自己的话记结论；每篇笔记写成 Markdown 文件，',
-      '统一放到你工作目录下的 3.探索/ 子目录里（文件名要像“以后会怎么搜它”）。',
+      `统一放到你工作目录下的 3.探索/${siteDir}/ 子目录里（文件名要像“以后会怎么搜它”）。`,
       '有用的结论、事实、工具、踩坑都要记；写 3-5 篇就够，别灌水。',
       '逛 3-5 个相关主题就停，最后写一篇简短的总结（今天逛了什么、记了什么、没逛成什么）。',
       cfg.browseEndTime ? `必须在 ${cfg.browseEndTime} 之前收尾停笔，不要恋战。` : '',
     ].filter(Boolean).join('\n')
 
-    log(`逛互联网开跑（${why}，mode=${cfg.browseMode}）`)
+    // 逛指定网站时挂 overlay（把 MCP 挂进去）
+    const overlay = site ? ensureOverlay(site) : ''
+    const args = ['--expose-internals', cli, '--profile', 'headless']
+    if (overlay) args.push('--patch', overlay)
+    args.push(prompt)
+
+    log(`逛互联网开跑（${why}，${site ? `站点=${site.name}` : '自由'}，mode=${cfg.browseMode}）`)
     // 用 process.execPath 直接跑 cli.js（shell:false），不经过 dsh.cmd / cmd.exe，
-    // 避免 .cmd 路径带空格被截断。claude 参考 dsh-bili-scroll 的 resolveDsh。
-    const child = spawn(process.execPath, ['--expose-internals', cli, '--profile', 'headless', prompt], {
+    // 避免 .cmd 路径带空格被截断。参考 dsh-bili-scroll 的 resolveDsh。
+    const child = spawn(process.execPath, args, {
       cwd: stateDir,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
     })
     browseChild = child
-    // 逛开始前先记下 stateDir/3.探索 里已有的文件名，exit 时把新增的搬进知识库
+    // 逛开始前先记下 stateDir/3.探索/<站点> 里已有的文件名，exit 时把新增的搬进知识库
     const preExisting = new Set()
     try {
-      const bd = join(stateDir, '3.探索')
+      const bd = join(stateDir, '3.探索', siteDir)
       if (existsSync(bd)) for (const f of readdirSync(bd)) preExisting.add(f)
     } catch { /* 读不到就算了 */ }
     // cmd.exe 吐的中文报错是 GBK，按 UTF-8 写日志会变方块；先 UTF-8 解，出替换符就回退 GBK
@@ -421,11 +510,11 @@ export function apply(ctx, config) {
     child.on('exit', (code) => {
       browseChild = null
       log(`逛互联网结束（code=${code}）`)
-      // 把 headless 会话产出的笔记搬进知识库 3.探索/（宿主不受沙箱限制，能写知识库）
+      // 把 headless 会话产出的笔记搬进知识库 3.探索/<站点>/（宿主不受沙箱限制，能写知识库）
       let moved = 0
       try {
-        const srcDir = join(stateDir, '3.探索')
-        const dstDir = join(cfg.vaultPath, '3.探索')
+        const srcDir = join(stateDir, '3.探索', siteDir)
+        const dstDir = join(cfg.vaultPath, '3.探索', siteDir)
         if (existsSync(srcDir)) {
           mkdirSync(dstDir, { recursive: true })
           for (const f of readdirSync(srcDir)) {
@@ -434,14 +523,15 @@ export function apply(ctx, config) {
             try {
               renameSync(join(srcDir, f), join(dstDir, f))
               moved++
-              log(`逛互联网笔记入知识库：3.探索/${f}`)
+              log(`逛互联网笔记入知识库：3.探索/${siteDir}/${f}`)
             } catch (e) { log(`搬笔记 ${f} 失败：${e?.message ?? e}`) }
           }
         }
       } catch (e) { log(`搬笔记时出错：${e?.message ?? e}`) }
-      if (moved) log(`逛互联网共 ${moved} 篇笔记写进知识库 3.探索/`)
+      if (moved) log(`逛互联网共 ${moved} 篇笔记写进知识库 3.探索/${siteDir}/`)
       else log('逛互联网结束：本次没有新增笔记落盘（可能没逛成、或笔记写在了别处）')
-      bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
+      if (site) bumpState({ siteBrowsed: { ...(readState().siteBrowsed || {}), [`${site.id}:${vault.dayKey()}`]: true } })
+      else bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
     })
     child.on('error', (e) => log(`逛互联网起不来：${e?.message ?? e}`))
     return { ok: true, started: true }
@@ -660,6 +750,19 @@ export function apply(ctx, config) {
     },
   })
 
+  tool({
+    name: 'bili_run',
+    description: '立刻起一个 headless 会话去逛 B站（不等定时窗口），逛完把笔记写进知识库 3.探索/bili/。适合"我现在就想看它逛一圈"的场合。需先装环境 + 扫码登录。',
+    parameters: {},
+    async execute() {
+      refreshCfg()
+      if (!biliHasCredential()) return { ok: false, error: 'B站 还没登录，先 bili_login_start 扫码，或去设置页点「扫码登录」' }
+      if (!bili.venvReadyNow(stateDir)) return { ok: false, error: 'B站 环境没装好，先 bili_setup（后台装几分钟，看 install.log）' }
+      const r = await doBrowse('manual', BILI_SITE)
+      return r
+    },
+  })
+
   // ── 手动触发 + 状态（走 HTTP，供设置页按钮用） ──
   const sendJson = (res, code, obj) => {
     try {
@@ -732,6 +835,16 @@ export function apply(ctx, config) {
     if (sub === '/site/login/poll' && req.method === 'POST') {
       const body = await readBody(req)
       return sendJson(res, 200, await biliLoginPoll(String(body?.key || '')))
+    }
+    // 逛指定网站源（POST {site:'bili'} 或 {site:'<customId>'}）
+    if (sub === '/site/browse' && req.method === 'POST') {
+      const body = await readBody(req)
+      const id = String(body?.site || 'bili').trim()
+      const site = id === 'bili' ? BILI_SITE : readCustomSites().find((s) => s.id === id)
+      if (!site) return sendJson(res, 400, { ok: false, error: `没有这个网站源：${id}` })
+      if (site.id === 'bili' && !biliHasCredential()) return sendJson(res, 400, { ok: false, error: 'B站 还没登录，先去设置页扫码登录' })
+      if (site.id === 'bili' && !bili.venvReadyNow(stateDir)) return sendJson(res, 400, { ok: false, error: 'B站 环境还没装，先去设置页「装 B站 环境」' })
+      return sendJson(res, 200, await doBrowse('manual', site))
     }
     // 二维码 PNG 直出（img 标签直接指这个路由）
     if (sub === '/site/qr' && req.method === 'GET') {
