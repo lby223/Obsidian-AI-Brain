@@ -307,11 +307,22 @@ export function apply(ctx, config) {
 
   // ── 功能 D：AI 逛互联网（到点 spawn headless 会话） ──
   const require = createRequire(import.meta.url)
+  // 找 dsh CLI。桌面版把 @deepseek-ai/dsh 打包进 app.asar，require.resolve 找不到；
+  // 真实 CLI 是 resources\runtime\cli\bin\dsh.cmd（内部调 DeepSeek Harness.exe --expose-internals cli.js）。
   const findDshCli = () => {
     try {
       for (const spec of ['@deepseek-ai/dsh/lib/bin.js', '@deepseek-ai/dsh']) {
         try { const p = require.resolve(spec); if (p && existsSync(p)) return p } catch { /* 下一个 */ }
       }
+    } catch { /* 忽略 */ }
+    // 兜底：本机桌面版 CLI（相对 process.execPath 定位，也试绝对路径）
+    try {
+      const exeDir = dirname(process.execPath)
+      const candidates = [
+        join(exeDir, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+        'C:\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
+      ]
+      for (const p of candidates) if (p && existsSync(p)) return p
     } catch { /* 忽略 */ }
     return ''
   }
@@ -346,12 +357,21 @@ export function apply(ctx, config) {
     ].filter(Boolean).join('\n')
 
     log(`逛互联网开跑（${why}，mode=${cfg.browseMode}）`)
-    const child = spawn(process.execPath, [cli, '--profile', 'headless', prompt], {
-      cwd: stateDir,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
-    })
+    // dsh.cmd 是批处理，必须走 cmd /c 启动；.js 直接 node 启动
+    const isCmd = /\.cmd$/i.test(cli)
+    const child = isCmd
+      ? spawn('cmd', ['/c', cli, '--profile', 'headless', prompt], {
+          cwd: stateDir,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
+        })
+      : spawn(process.execPath, [cli, '--profile', 'headless', prompt], {
+          cwd: stateDir,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
+        })
     browseChild = child
     const pick = (buf) => { try { appendFileSync(logFile, Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf)), 'utf8') } catch { /* 忽略 */ } }
     child.stdout?.on('data', pick)
