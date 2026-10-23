@@ -317,19 +317,23 @@ export function apply(ctx, config) {
   // ── 功能 D：AI 逛互联网（到点 spawn headless 会话） ──
   const require = createRequire(import.meta.url)
   // 找 dsh CLI。桌面版把 @deepseek-ai/dsh 打包进 app.asar，require.resolve 找不到；
-  // 真实 CLI 是 resources\runtime\cli\bin\dsh.cmd（内部调 DeepSeek Harness.exe --expose-internals cli.js）。
+  // 真实入口是 app.asar 里的 @deepseek-ai/dsh-desktop-host/lib/cli.js，
+  // 用 process.execPath（=DeepSeek Harness.exe，带 ELECTRON_RUN_AS_NODE=1 时就是 node）
+  //   加 --expose-internals 直接跑它——**别用 dsh.cmd + cmd /c**（.cmd 路径带空格会被截断成 'C:\DeepSeek'）。
+  // 参考 dsh-bili-scroll：resolveDsh 返回 { command: process.execPath, args: [cli.js], shell: false }。
   const findDshCli = () => {
+    // ① npm / web profile：让 Node 解析器找 bin.js
     try {
       for (const spec of ['@deepseek-ai/dsh/lib/bin.js', '@deepseek-ai/dsh']) {
         try { const p = require.resolve(spec); if (p && existsSync(p)) return p } catch { /* 下一个 */ }
       }
     } catch { /* 忽略 */ }
-    // 兜底：本机桌面版 CLI（相对 process.execPath 定位，也试绝对路径）
+    // ② 桌面版：app.asar 里的 cli.js（Electron 的 node 能读 asar；existsSync 也能命中 asar 内路径）
     try {
       const exeDir = dirname(process.execPath)
       const candidates = [
-        join(exeDir, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
-        'C:\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
+        join(exeDir, 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'),
+        'C:\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js',
       ]
       for (const p of candidates) if (p && existsSync(p)) return p
     } catch { /* 忽略 */ }
@@ -358,23 +362,25 @@ export function apply(ctx, config) {
     ].filter(Boolean).join('\n')
 
     log(`逛互联网开跑（${why}，mode=${cfg.browseMode}）`)
-    // dsh.cmd 是批处理，必须走 cmd /c 启动；.js 直接 node 启动
-    const isCmd = /\.cmd$/i.test(cli)
-    const child = isCmd
-      ? spawn('cmd', ['/c', cli, '--profile', 'headless', prompt], {
-          cwd: stateDir,
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
-        })
-      : spawn(process.execPath, [cli, '--profile', 'headless', prompt], {
-          cwd: stateDir,
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
-        })
+    // 用 process.execPath 直接跑 cli.js（shell:false），不经过 dsh.cmd / cmd.exe，
+    // 避免 .cmd 路径带空格被截断。claude 参考 dsh-bili-scroll 的 resolveDsh。
+    const child = spawn(process.execPath, ['--expose-internals', cli, '--profile', 'headless', prompt], {
+      cwd: stateDir,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
+    })
     browseChild = child
-    const pick = (buf) => { try { appendFileSync(logFile, Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf)), 'utf8') } catch { /* 忽略 */ } }
+    // cmd.exe 吐的中文报错是 GBK，按 UTF-8 写日志会变方块；先 UTF-8 解，出替换符就回退 GBK
+    const toText = (buf) => {
+      try {
+        const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf))
+        const u = b.toString('utf8')
+        if (!u.includes('\uFFFD')) return u
+        try { return new TextDecoder('gbk').decode(b) } catch { return u }
+      } catch { return String(buf) }
+    }
+    const pick = (buf) => { try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 忽略 */ } }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
@@ -382,6 +388,7 @@ export function apply(ctx, config) {
       log(`逛互联网结束（code=${code}）`)
       bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
     })
+    child.on('error', (e) => log(`逛互联网起不来：${e?.message ?? e}`))
     return { ok: true, started: true }
   }
 
