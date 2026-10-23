@@ -29,6 +29,7 @@ import { runReview } from './lib/review.mjs'
 import * as bili from './lib/bili.mjs'
 import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
+import * as tidy from './lib/tidy.mjs'
 
 export const name = 'ai-brain'
 export const inject = ['tools', 'settings', 'webServer']
@@ -61,6 +62,8 @@ export const Config = !z ? undefined : z.object({
   biliPythonPath: z.string().default('').extra('volatile', true),
   // ── 自定义网站源（JSON 数组，每个是 normalizeCustomSite 认的对象）──
   customSites: z.string().default('').extra('volatile', true),
+  // 复盘完顺手整理目录？默认关——先让「体检 + 整理」只在你手动点时动库
+  tidyOnReview: z.boolean().default(false).extra('volatile', true),
 })
 
 const DEFAULTS = {
@@ -72,6 +75,7 @@ const DEFAULTS = {
   biliPerDay: 5, biliAutoComment: false, biliMentionName: '', biliReplyToComments: false,
   biliDmMode: 'off', biliDmUid: 0, biliKeywords: '', biliPythonPath: '',
   customSites: '',
+  tidyOnReview: false,
 }
 
 export function apply(ctx, config) {
@@ -165,6 +169,7 @@ export function apply(ctx, config) {
     if ('biliKeywords' in o) o.biliKeywords = String(o.biliKeywords || '').slice(0, 500)
     if ('biliPythonPath' in o) o.biliPythonPath = String(o.biliPythonPath || '')
     if ('customSites' in o) o.customSites = String(o.customSites || '').slice(0, 20000)
+    if ('tidyOnReview' in o) o.tidyOnReview = Boolean(o.tidyOnReview)
     return o
   }
 
@@ -308,6 +313,19 @@ export function apply(ctx, config) {
     },
   })
 
+  tool({
+    name: 'brain_tidy',
+    description: '知识库体检 / 整理。action=scan（只读，报编号撞车、同名嵌套目录、空文件、未来日期、散落笔记）或 action=tidy（按固定规则表移动/改名，绝不删文件，绝不碰 3.自我 与 社交人格）。不确定怎么归类的东西它只报告不动手。',
+    parameters: {
+      action: { type: 'string', description: 'scan（只体检，默认）或 tidy（体检并把能确定的搬对位置）' },
+    },
+    async execute(args) {
+      const a = String(args?.action || 'scan').trim()
+      if (a === 'tidy') return doTidy()
+      return doScan()
+    },
+  })
+
   // ── 功能 C：每日定时复盘 ──
   const stateFile = join(stateDir, 'state.json')
   const readState = () => readJson(stateFile, {})
@@ -341,10 +359,37 @@ export function apply(ctx, config) {
     if (r.ok) {
       bumpState({ reviewed: { ...(readState().reviewed || {}), [today]: true }, lastReviewAt: new Date().toISOString() })
       log(`复盘完成：写入 ${r.notes.length} 篇${r.archived ? '，收件箱已归档' : ''}`)
+      // 复盘后顺手整理目录（默认关，见 Config.tidyOnReview）
+      if (cfg.tidyOnReview && cfg.vaultPath) {
+        try {
+          const t = tidy.apply(cfg.vaultPath, { log })
+          log(`复盘后整理：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${t.reportPath ? `（清单见 ${t.reportPath}）` : ''}`)
+        } catch (e) { log(`复盘后整理出错（已兜住）：${e?.stack ?? e}`) }
+      }
     } else {
       log(`复盘没成（${why}）：${r.error}${r.empty ? '（收件箱空，不算错）' : ''}`)
     }
     return r
+  }
+
+  // ── 功能 E：知识库体检 + 受限整理（规则驱动，不用模型） ──
+  // 体检：只读，报「编号撞车 / 同名嵌套 / 空文件 / 未来日期 / 索引与目录同名 / 散落笔记」
+  // 整理：只做 move / rename，绝不删除，绝不碰 3.自我 与 社交人格
+  const doScan = () => {
+    refreshCfg()
+    if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
+    const s = tidy.scan(cfg.vaultPath)
+    if (s.ok) log(`体检完成：${s.summary.total} 条（${s.summary.errors} 个硬错），待整理 ${tidy.plan(cfg.vaultPath).actions.length} 项`)
+    return s
+  }
+
+  const doTidy = () => {
+    refreshCfg()
+    if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
+    log('整理开始（只移动/改名，不删文件）')
+    const t = tidy.apply(cfg.vaultPath, { log })
+    log(`整理完成：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}`)
+    return t
   }
 
   const tick = () => {
@@ -881,6 +926,8 @@ export function apply(ctx, config) {
       try { text = readFileSync(logFile, 'utf8').split('\n').slice(-200).join('\n') } catch { /* 没日志就给空 */ }
       return sendJson(res, 200, { ok: true, text })
     }
+    if (sub === '/tidy/scan' && req.method === 'GET') return sendJson(res, 200, doScan())
+    if (sub === '/tidy/apply' && req.method === 'POST') return sendJson(res, 200, doTidy())
     if (sub === '/review' && req.method === 'POST') return sendJson(res, 200, await doReview('manual'))
     if (sub === '/browse' && req.method === 'POST') return sendJson(res, 200, await doBrowse('manual'))
     if (sub === '/browse/stop' && req.method === 'POST') {

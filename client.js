@@ -81,6 +81,12 @@ window.__ModuleLoader__.load({
 [data-ab-pre]{margin:10px 0 0;padding:10px 12px;border-radius:8px;max-height:320px;overflow:auto;font-size:11px;
   line-height:16px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-layer-4,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+/* ── 体检结果清单 ── */
+[data-ab-issues]{margin-top:10px;padding:8px 10px;border-radius:8px;max-height:260px;overflow:auto;
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.10));}
+[data-ab-issue]{font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-ab-issue]+[data-ab-issue]{margin-top:3px;}
+[data-ab-issue][data-level="error"]{color:#f59e0b;}
 /* ── 进度条 ── */
 [data-ab-progress]{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.18));overflow:hidden;flex:1;min-width:80px;}
 [data-ab-progress] i{display:block;height:100%;background:#3b82f6;border-radius:3px;transition:width .3s ease;}
@@ -157,6 +163,8 @@ window.__ModuleLoader__.load({
       // B站 源状态
       const [biliSt, setBiliSt] = React.useState(null)
       const [biliQr, setBiliQr] = React.useState('')
+      // 体检结果（点「体检」后才填）
+      const [check, setCheck] = React.useState(null)
 
       React.useEffect(() => {
         let alive = true
@@ -257,6 +265,31 @@ window.__ModuleLoader__.load({
           const r = await jpost('/browse/stop', {})
           if (r && r.ok) say(r.stopped ? '已停止逛互联网，本次产出已经收尾入库' : '当前没有在逛', r.stopped ? 'good' : '')
           else say('停止没成：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onTidyScan = async () => {
+        setBusy('scan'); say('')
+        try {
+          const r = await jget('/tidy/scan')
+          if (r && r.ok) {
+            setCheck(r)
+            const s = r.summary || {}
+            say(s.total ? `体检完：${s.total} 条（${s.errors} 个硬错）` : '体检完：没发现问题 ✓', s.errors ? 'warn' : 'good')
+          } else { setCheck(null); say('体检没成：' + ((r && r.error) || '未知原因'), 'warn') }
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onTidyApply = async () => {
+        if (!window.confirm('整理只做两件事：把确定归错位的笔记搬到该去的目录、把「同名嵌套」和「索引与目录同名」修好。\n\n它绝不删文件，也绝不碰 3.自我/ 和 社交人格/。清单会写进 9.归档/整理记录/，想撤回照着搬回来就行。\n\n确定现在整理吗？')) return
+        setBusy('tidy'); say('')
+        try {
+          const r = await jpost('/tidy/apply', {})
+          if (r && r.ok) {
+            const n = (r.moved || []).length
+            say(`整理完：搬了 ${n} 项${(r.skipped || []).length ? `，跳过 ${(r.skipped || []).length} 项` : ''}${r.reportPath ? `。清单：${r.reportPath}` : ''}`, 'good')
+            setCheck(null)
+          } else say('整理没成：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -395,6 +428,24 @@ window.__ModuleLoader__.load({
         h(Field, { label: 'apiBaseUrl', note: '如 https://api.deepseek.com/v1', value: draft?.apiBaseUrl, onChange: (v) => set('apiBaseUrl', v), placeholder: 'https://api.deepseek.com/v1' }),
         h(Field, { label: 'apiKey', note: '密钥，只存本机 config.json', value: draft?.apiKey, onChange: (v) => set('apiKey', v), placeholder: 'sk-...' }),
         h(Field, { label: 'model', note: '如 deepseek-chat', value: draft?.model, onChange: (v) => set('model', v), placeholder: 'deepseek-chat' }),
+
+        h('div', { 'data-ab-h': '' }, '知识库体检 / 整理'),
+        h('div', { 'data-ab-note': '' }, '体检是只读的：编号撞车、同名嵌套目录、空文件、日期写在未来、笔记散在目录根下——这些规则都能判准，不用模型。整理只按固定规则表搬动/改名，绝不删文件，也绝不碰 3.自我/ 和 社交人格/；拿不准的只报告不动手。'),
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', disabled: busy === 'scan', onClick: onTidyScan }, busy === 'scan' ? '体检中…' : '体检一下'),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'tidy', onClick: onTidyApply }, busy === 'tidy' ? '整理中…' : '整理目录')),
+        check && check.ok
+          ? h('div', { 'data-ab-issues': '' },
+              (check.issues || []).length
+                ? (check.issues || []).map((it, i) => h('div', { 'data-ab-issue': '', 'data-level': it.level }, `${it.level === 'error' ? '硬错' : '提醒'}：${it.title}`))
+                : h('div', { 'data-ab-note': '' }, '没发现问题 ✓'))
+          : null,
+        h(ToggleRow, {
+          label: '复盘后自动整理',
+          note: '开：每次复盘完顺手按规则表整理一遍目录（动的只有确定归错位的，会写清单）。默认关',
+          on: !!cfg.tidyOnReview,
+          onChange: (v) => { jpost('/config', { tidyOnReview: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+        }),
 
         h('div', { 'data-ab-row': '' },
           h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存'),

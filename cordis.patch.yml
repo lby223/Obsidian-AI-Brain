@@ -15,6 +15,7 @@
         browseEnabled: false
         browseTime: ""
         browseMode: "off"
+        browseEndTime: ""
         browseMaxMinutes: 20
         biliPerDay: 5
         biliAutoComment: false
@@ -24,3 +25,4 @@
         biliDmUid: 0
         biliKeywords: ""
         customSites: ""
+        tidyOnReview: false
