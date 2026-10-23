@@ -248,11 +248,12 @@ window.__ModuleLoader__.load({
         } catch (e) { setLog('读不到日志：' + String(e?.message ?? e)) } finally { setBusy('') }
       }
 
-      const onBiliSetup = async () => {
-        setBusy('bilisetup'); say('环境开始装（几分钟，后台跑），进度看「概览」日志')
+      const onBiliSetup = async (isReinstall) => {
+        if (isReinstall && !window.confirm('B站 环境已经装好了。\n重装 = 把依赖再装一遍（几分钟，不会删已装的东西，也不会重建 venv）。确定要重装吗？')) return
+        setBusy('bilisetup'); say('')
         try {
           const r = await jpost('/site/setup', {})
-          if (r && r.ok) say('环境开始装（几分钟），装好会记下 python 路径', 'good')
+          if (r && r.ok) say(isReinstall ? '开始重装（几分钟，后台跑），日志见「概览」页' : '环境开始装（几分钟），装好会记下 python 路径', 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -407,7 +408,7 @@ window.__ModuleLoader__.load({
           h('span', { 'data-ab-badge': '' }, biliLoggedIn ? '已登录' : '未登录'),
           installing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 装环境中') : null,
           h('div', { 'data-ab-grow': '' }),
-          h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup' || installing, onClick: onBiliSetup }, '装 B站 环境'),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup' || installing, onClick: () => onBiliSetup(biliVenvReady) }, biliVenvReady ? '重装环境' : '装 B站 环境'),
           biliLoggedIn
             ? h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bilibrowse', onClick: onBiliBrowse }, '逛 B站')
             : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录')),

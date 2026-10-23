@@ -615,14 +615,18 @@ export function apply(ctx, config) {
       pythonPath: biliPython(),
       log,
       onReady: (venvPy) => {
-        biliInstalling = false
-        jobEnd('bilisetup')
         // 写进 config.json（pythonPath 由插件自算，走本地优先）
         try {
           const cur = readJson(cfgFile, {})
           writeJson(cfgFile, { ...cur, biliPythonPath: venvPy, _set: [...(Array.isArray(cur._set) ? cur._set : []), 'biliPythonPath'] })
           refreshCfg()
         } catch (e) { log(`记 pythonPath 失败：${e?.message ?? e}`) }
+      },
+      // ⚠️ 不管成没成都要收尾：失败时若不复位，UI 会永远显示「安装中」、按钮永久禁用
+      onDone: (code) => {
+        biliInstalling = false
+        jobEnd('bilisetup')
+        if (code !== 0) log(`B站 环境装失败（exit ${code}）—— 详情看 install.log`)
       },
     })
     return r
