@@ -130,6 +130,7 @@ window.__ModuleLoader__.load({
             model: cfg.model || '',
             reviewTime: cfg.reviewTime || '23:00',
             browseTime: cfg.browseTime || '',
+            browseEndTime: cfg.browseEndTime || '',
           })
         }
       }, [cfg, draft])
@@ -141,7 +142,7 @@ window.__ModuleLoader__.load({
         setBusy('save')
         try {
           const p = {}
-          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime']) {
+          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime']) {
             if (draft && k in draft) p[k] = draft[k]
           }
           const r = await jpost('/config', p)
@@ -196,6 +197,7 @@ window.__ModuleLoader__.load({
           h('span', { 'data-ab-badge': '' }, cfg.vaultPath ? '库已配置' : '库未配置'),
           h('span', { 'data-ab-badge': '' }, modelOk ? '模型已配' : '模型未配'),
           h('span', { 'data-ab-badge': '' }, st.reviewedToday ? '今天已复盘' : '今天未复盘'),
+          h('span', { 'data-ab-badge': '' }, st.browsing ? '逛互联网进行中' : ''),
           h('div', { 'data-ab-grow': '' }),
           h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'review', onClick: onReview }, '现在复盘'),
           h('button', { 'data-ab-btn': '', disabled: busy === 'browse', onClick: onBrowse }, '现在逛'),
@@ -240,7 +242,8 @@ window.__ModuleLoader__.load({
           on: sw('browseEnabled'),
           onChange: (v) => { jpost('/config', { browseEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
-        h(Field, { label: '逛的时间', note: 'HH:mm，留空 = 只手动逛', value: draft?.browseTime, onChange: (v) => set('browseTime', v), placeholder: '21:00' }),
+        h(Field, { label: '逛的时间', note: 'HH:mm，到点自动开始（每天一次），留空 = 只手动逛', value: draft?.browseTime, onChange: (v) => set('browseTime', v), placeholder: '21:00' }),
+        h(Field, { label: '结束时间', note: 'HH:mm，到点强制收尾（没逛完也停）；留空 = 逛完自己停', value: draft?.browseEndTime, onChange: (v) => set('browseEndTime', v), placeholder: '21:30' }),
         h('div', { 'data-ab-row': '' },
           h('div', { 'data-ab-grow': '' },
             h('div', { 'data-ab-label': '' }, '浏览偏好'),

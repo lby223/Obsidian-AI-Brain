@@ -42,6 +42,7 @@ export const Config = !z ? undefined : z.object({
   reviewPrompt: z.string().default('').extra('volatile', true),
   browseEnabled: z.boolean().default(false).extra('volatile', true),
   browseTime: z.string().default('').extra('volatile', true),
+  browseEndTime: z.string().default('').extra('volatile', true),
   browseMode: z.string().default('off').extra('volatile', true),
 })
 
@@ -49,7 +50,7 @@ const DEFAULTS = {
   vaultPath: '', rulesExtra: '',
   reviewEnabled: true, reviewTime: '23:00',
   apiBaseUrl: '', apiKey: '', model: '', reviewPrompt: '',
-  browseEnabled: false, browseTime: '', browseMode: 'off',
+  browseEnabled: false, browseTime: '', browseEndTime: '', browseMode: 'off',
 }
 
 export function apply(ctx, config) {
@@ -108,6 +109,7 @@ export function apply(ctx, config) {
     if ('reviewPrompt' in o) o.reviewPrompt = String(o.reviewPrompt || '').slice(0, 20000)
     if ('browseEnabled' in o) o.browseEnabled = Boolean(o.browseEnabled)
     if ('browseTime' in o) o.browseTime = /^\d{1,2}:\d{2}$/.test(String(o.browseTime || '')) ? String(o.browseTime) : ''
+    if ('browseEndTime' in o) o.browseEndTime = /^\d{1,2}:\d{2}$/.test(String(o.browseEndTime || '')) ? String(o.browseEndTime) : ''
     if ('browseMode' in o) o.browseMode = ['off', 'kb'].includes(String(o.browseMode)) ? String(o.browseMode) : 'off'
     return o
   }
@@ -315,6 +317,9 @@ export function apply(ctx, config) {
   }
 
   const browseToday = () => readState().browsed?.[vault.dayKey()] === true
+  let browseChild = null   // 当前在跑的逛互联网子进程（到结束时间要杀）
+
+  const hmNow = () => { const n = new Date(); return `${n.getHours()}:${String(n.getMinutes()).padStart(2, '0')}` }
 
   const doBrowse = async (why = 'schedule') => {
     refreshCfg()
@@ -329,7 +334,8 @@ export function apply(ctx, config) {
       `浏览偏好：${mode}`,
       '要求：不要复制全文，消化后用自己的话记结论；用 brain_capture 把有用的结论、事实、工具、踩坑记进知识库。',
       '逛 3-5 个相关主题就停，写一篇简短总结（今天逛了什么、记了什么）。',
-    ].join('\n')
+      cfg.browseEndTime ? `必须在 ${cfg.browseEndTime} 之前收尾停笔，不要恋战。` : '',
+    ].filter(Boolean).join('\n')
 
     log(`逛互联网开跑（${why}，mode=${cfg.browseMode}）`)
     const child = spawn(process.execPath, [cli, '--profile', 'headless', prompt], {
@@ -338,10 +344,12 @@ export function apply(ctx, config) {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
     })
+    browseChild = child
     const pick = (buf) => { try { appendFileSync(logFile, Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf)), 'utf8') } catch { /* 忽略 */ } }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      browseChild = null
       log(`逛互联网结束（code=${code}）`)
       bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
     })
@@ -351,10 +359,14 @@ export function apply(ctx, config) {
   const browseTick = () => {
     try {
       refreshCfg()
+      // 到结束时间：还有子进程在逛 → 强制杀（有始有终）
+      if (cfg.browseEndTime && hmNow() === cfg.browseEndTime && browseChild) {
+        log(`到结束时间 ${cfg.browseEndTime}，强制收尾`)
+        try { browseChild.kill() } catch { /* 忽略 */ }
+        browseChild = null
+      }
       if (!cfg.browseEnabled || !cfg.browseTime) return
-      const now = new Date()
-      const hm = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`
-      if (hm !== cfg.browseTime) return
+      if (hmNow() !== cfg.browseTime) return
       if (browseToday()) return
       doBrowse('schedule').catch((e) => log(`逛互联网异常：${e?.stack ?? e}`))
     } catch (e) { log(`逛互联网定时器出错（已兜住）：${e?.stack ?? e}`) }
@@ -392,7 +404,8 @@ export function apply(ctx, config) {
         vault: cfg.vaultPath || '',
         reviewEnabled: cfg.reviewEnabled, reviewTime: cfg.reviewTime,
         reviewedToday: reviewToday(), browseEnabled: cfg.browseEnabled, browseTime: cfg.browseTime,
-        browseMode: cfg.browseMode, browsedToday: browseToday(),
+        browseEndTime: cfg.browseEndTime, browsing: Boolean(browseChild),
+        browseMode: cfg.browseMode, browsedToday: browseToday(), browsing: Boolean(browseChild),
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
         config: { ...cfg }, // 完整配置（apiKey 也带，本机同源 fetch，设置页要回显）
       })
