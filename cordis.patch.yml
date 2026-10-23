@@ -1,0 +1,17 @@
+# AI Brain —— DSH 插件的 bundle patch
+# id 必须等于命名空间名（ai-brain），否则设置页认不到这一行。
+- insert:
+    - id: ai-brain
+      name: dsh-ai-brain
+      config:
+        vaultPath: ""
+        rulesExtra: ""
+        reviewEnabled: true
+        reviewTime: "23:00"
+        apiBaseUrl: ""
+        apiKey: ""
+        model: ""
+        reviewPrompt: ""
+        browseEnabled: false
+        browseTime: ""
+        browseMode: "off"
