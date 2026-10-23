@@ -97,6 +97,15 @@ export function apply(ctx, config) {
     }
     return out
   }
+  // 时间统一存成 HH:mm（补零）：「2:00」「02:00」都收，避免格式不一致导致对时错配
+  // ⚠️ 必须定义在 clampPatch 之前——loadCfg→clampPatch 在模块初始化时就会跑，定义在后会 TDZ ReferenceError
+  const normalizeHm = (v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim())
+    if (!m) return ''
+    const h = Number(m[1]), min = Number(m[2])
+    if (h > 23 || min > 59) return ''
+    return `${String(h).padStart(2, '0')}:${m[2]}`
+  }
   const clampPatch = (p) => {
     const o = { ...p }
     if ('vaultPath' in o) o.vaultPath = String(o.vaultPath || '').trim()
@@ -331,14 +340,6 @@ export function apply(ctx, config) {
   let browseChild = null   // 当前在跑的逛互联网子进程（到结束时间要杀）
 
   const hmNow = () => { const n = new Date(); return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` }
-  // 时间统一存成 HH:mm（补零）：「2:00」「02:00」都收，避免格式不一致导致对时错配
-  const normalizeHm = (v) => {
-    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim())
-    if (!m) return ''
-    const h = Number(m[1]), min = Number(m[2])
-    if (h > 23 || min > 59) return ''
-    return `${String(h).padStart(2, '0')}:${m[2]}`
-  }
 
   const doBrowse = async (why = 'schedule') => {
     refreshCfg()
