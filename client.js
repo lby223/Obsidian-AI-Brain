@@ -68,6 +68,15 @@ window.__ModuleLoader__.load({
 [data-ab-pre]{margin:6px 0 0;padding:8px 9px;border-radius:8px;max-height:240px;overflow:auto;font-size:11px;
   line-height:15px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-layer-4,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+/* ── 开关 Switch：滑块式，开=蓝+滑块右移，关=灰+滑块左移 ── */
+[data-ab-sw]{position:relative;width:40px;height:22px;border-radius:11px;cursor:pointer;flex-shrink:0;
+  border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.25));transition:background .15s ease;padding:0;}
+[data-ab-sw] i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+  background:#fff;transition:left .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.25);}
+[data-ab-sw][data-on]{background:#3b82f6;border-color:#3b82f6;}
+[data-ab-sw][data-on] i{left:20px;}
+[data-ab-sw][disabled]{opacity:.5;cursor:default;}
 `
 
     function Switch({ on, onChange, disabled }) {
