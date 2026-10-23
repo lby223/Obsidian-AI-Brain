@@ -26,6 +26,9 @@ import { homedir } from 'node:os'
 import { RULES, buildRules } from './lib/rules.mjs'
 import * as vault from './lib/vault.mjs'
 import { runReview } from './lib/review.mjs'
+import * as bili from './lib/bili.mjs'
+import * as login from './lib/login.mjs'
+import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
 
 export const name = 'ai-brain'
 export const inject = ['tools', 'settings', 'webServer']
@@ -44,6 +47,18 @@ export const Config = !z ? undefined : z.object({
   browseTime: z.string().default('').extra('volatile', true),
   browseEndTime: z.string().default('').extra('volatile', true),
   browseMode: z.string().default('off').extra('volatile', true),
+  // ── B站（网站源：内置）──
+  biliPerDay: z.number().default(5).extra('volatile', true),
+  biliAutoComment: z.boolean().default(false).extra('volatile', true),
+  biliMentionName: z.string().default('').extra('volatile', true),
+  biliReplyToComments: z.boolean().default(false).extra('volatile', true),
+  biliDmMode: z.string().default('off').extra('volatile', true),
+  biliDmUid: z.number().default(0).extra('volatile', true),
+  biliKeywords: z.string().default('').extra('volatile', true),
+  // 运行时自算：装好 venv 后记下 python 路径（不展示在设置页，只存 config.json）
+  biliPythonPath: z.string().default('').extra('volatile', true),
+  // ── 自定义网站源（JSON 数组，每个是 normalizeCustomSite 认的对象）──
+  customSites: z.string().default('').extra('volatile', true),
 })
 
 const DEFAULTS = {
@@ -51,6 +66,9 @@ const DEFAULTS = {
   reviewEnabled: true, reviewTime: '23:00',
   apiBaseUrl: '', apiKey: '', model: '', reviewPrompt: '',
   browseEnabled: false, browseTime: '', browseEndTime: '', browseMode: 'off',
+  biliPerDay: 5, biliAutoComment: false, biliMentionName: '', biliReplyToComments: false,
+  biliDmMode: 'off', biliDmUid: 0, biliKeywords: '', biliPythonPath: '',
+  customSites: '',
 }
 
 export function apply(ctx, config) {
@@ -120,6 +138,15 @@ export function apply(ctx, config) {
     if ('browseTime' in o) o.browseTime = normalizeHm(o.browseTime)
     if ('browseEndTime' in o) o.browseEndTime = normalizeHm(o.browseEndTime)
     if ('browseMode' in o) o.browseMode = ['off', 'kb'].includes(String(o.browseMode)) ? String(o.browseMode) : 'off'
+    if ('biliPerDay' in o) o.biliPerDay = Math.max(0, Math.min(Number(o.biliPerDay) || 0, 50))
+    if ('biliAutoComment' in o) o.biliAutoComment = Boolean(o.biliAutoComment)
+    if ('biliMentionName' in o) o.biliMentionName = String(o.biliMentionName || '').slice(0, 50)
+    if ('biliReplyToComments' in o) o.biliReplyToComments = Boolean(o.biliReplyToComments)
+    if ('biliDmMode' in o) o.biliDmMode = ['off', 'only', 'both'].includes(String(o.biliDmMode)) ? String(o.biliDmMode) : 'off'
+    if ('biliDmUid' in o) o.biliDmUid = Math.max(0, Math.floor(Number(o.biliDmUid) || 0))
+    if ('biliKeywords' in o) o.biliKeywords = String(o.biliKeywords || '').slice(0, 500)
+    if ('biliPythonPath' in o) o.biliPythonPath = String(o.biliPythonPath || '')
+    if ('customSites' in o) o.customSites = String(o.customSites || '').slice(0, 20000)
     return o
   }
 
@@ -441,6 +468,198 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(bt), 'ai-brain: 逛互联网定时器')
   } catch (e) { log(`逛互联网定时器没起来：${e?.message ?? e}`) }
 
+  // ── 网站源（B站内置 + 自定义 MCP） ──
+  // 铺 mcp_server.py 进家目录（内容同才跳过）
+  bili.ensureHomeFiles(pluginDir, stateDir, log)
+
+  const biliHasCredential = () => existsSync(join(stateDir, 'bili_credential.json'))
+  let biliMcp = null
+  let biliInstalling = false
+
+  // 读自定义网站源（从 cfg.customSites 这个 JSON 字符串里解析）
+  const readCustomSites = () => {
+    try {
+      const arr = JSON.parse(String(cfg.customSites || '').trim() || '[]')
+      if (!Array.isArray(arr)) return []
+      return arr.map(normalizeCustomSite).filter(Boolean)
+    } catch { return [] }
+  }
+
+  // 起 B站 MCP（venv 没装好会抛错；调用方 catch）
+  const ensureBiliMcp = async () => {
+    if (biliMcp?.running) return biliMcp
+    const py = cfg.biliPythonPath || (bili.venvReadyNow(stateDir)
+      ? (process.platform === 'win32' ? join(stateDir, '.venv', 'Scripts', 'python.exe') : join(stateDir, '.venv', 'bin', 'python'))
+      : 'python')
+    biliMcp = bili.spawnBiliMcp({ pythonPath: py, stateDir, log })
+    return biliMcp
+  }
+  const biliCall = async (toolName, args, opts) => {
+    const client = await ensureBiliMcp()
+    return client.call(toolName, args, opts)
+  }
+
+  const biliSetup = () => {
+    if (biliInstalling) return { ok: true, busy: true, hint: '正在装，别重复起' }
+    biliInstalling = true
+    const r = bili.runInstall({
+      pluginDir, stateDir,
+      pythonPath: cfg.biliPythonPath || 'python',
+      log,
+      onReady: (venvPy) => {
+        biliInstalling = false
+        // 写进 config.json（pythonPath 由插件自算，走本地优先）
+        try {
+          const cur = readJson(cfgFile, {})
+          writeJson(cfgFile, { ...cur, biliPythonPath: venvPy, _set: [...(Array.isArray(cur._set) ? cur._set : []), 'biliPythonPath'] })
+          refreshCfg()
+        } catch (e) { log(`记 pythonPath 失败：${e?.message ?? e}`) }
+      },
+    })
+    return r
+  }
+
+  const biliLoginStart = async () => {
+    try {
+      const { key, url } = await login.loginStart()
+      const png = await login.renderQrPng(cfg.biliPythonPath || 'python', stateDir, url)
+      return {
+        ok: true, key, url, png,
+        hint: png ? '用 present 把这张 PNG 推给本人扫；扫完调 bili_login_poll（或面板点「查扫码」）' : '没画出 PNG：先点「装 B站 环境」（venv 里要有 qrcode）',
+      }
+    } catch (e) { return { ok: false, error: String(e?.message ?? e) } }
+  }
+
+  const biliLoginPoll = async (key) => {
+    const r = await login.loginPoll(String(key || ''))
+    if (r.state === 'ok') {
+      const file = login.saveCredential(stateDir, r.credential)
+      log(`B站 登录成功，凭证已写入 ${file}`)
+      return { ok: true, state: 'ok', file }
+    }
+    return { ok: r.state !== 'unknown', state: r.state, code: r.code, message: r.message }
+  }
+
+  // B站 工具白名单（写工具默认关，账号操作靠开关放出来）
+  const biliWhitelist = () => {
+    const list = [...BILI_SITE.whitelistDefault]
+    if (cfg.biliAutoComment || cfg.biliReplyToComments) list.push('bili_reply')
+    if (cfg.biliDmMode !== 'off') list.push('bili_send_message')
+    return list
+  }
+
+  // ── B站 宿主工具注册 ──
+  tool({
+    name: 'bili_whoami',
+    description: '看 B站 那边登录的是谁（凭证是否有效、昵称、mid）。第一次用要先在「AI 大脑」设置页里扫码登录。',
+    parameters: {},
+    async execute() {
+      if (!biliHasCredential()) return { ok: false, loggedIn: false, hint: '还没登录：去「AI 大脑」设置页的「B站」里点「扫码登录」' }
+      try {
+        const r = await biliCall('bili_check_credential', {})
+        return { ok: true, loggedIn: true, ...(typeof r === 'object' ? r : { raw: r }) }
+      } catch (e) { return { ok: false, loggedIn: true, error: String(e?.message ?? e) } }
+    },
+  })
+
+  tool({
+    name: 'bili_search',
+    description: '搜 B站 视频（可排序）。返回标题 / BV号 / 播放量 / UP / 时长 等。',
+    parameters: {
+      keyword: { type: 'string', description: '搜索关键词' },
+      num: { type: 'number', description: '返回几条（默认 10，最大 50）' },
+      order: { type: 'string', description: 'totalrank=综合（默认）/ click=播放 / pubdate=最新 / dm=弹幕' },
+    },
+    async execute(args) {
+      try {
+        return await biliCall('bili_search', {
+          keyword: String(args.keyword ?? ''), num: Math.max(1, Math.min(Number(args.num) || 10, 50)), order: String(args.order || 'totalrank'),
+        })
+      } catch (e) { return { ok: false, error: String(e?.message ?? e) } }
+    },
+  })
+
+  tool({
+    name: 'bili_subtitle',
+    description: '取一个视频的字幕（AI 字幕）全文。**判断内容就靠它**。',
+    parameters: { bvid: { type: 'string', description: 'BV号' } },
+    async execute(args) { try { return await biliCall('bili_subtitle', { bvid: String(args.bvid ?? '') }) } catch (e) { return { ok: false, error: String(e?.message ?? e) } } },
+  })
+
+  tool({
+    name: 'bili_comments',
+    description: '取一个视频的热门评论（含点赞/回复数）。',
+    parameters: { bvid: { type: 'string', description: 'BV号' }, num: { type: 'number', description: '取几条（默认 30）' } },
+    async execute(args) {
+      try { return await biliCall('bili_comments', { bvid: String(args.bvid ?? ''), num: Math.max(1, Number(args.num) || 30) }) }
+      catch (e) { return { ok: false, error: String(e?.message ?? e) } }
+    },
+  })
+
+  tool({
+    name: 'bili_video_info',
+    description: '取一个视频的详细信息（标题/UP/播放/简介等）。',
+    parameters: { bvid: { type: 'string', description: 'BV号' } },
+    async execute(args) { try { return await biliCall('bili_video_info', { bvid: String(args.bvid ?? '') }) } catch (e) { return { ok: false, error: String(e?.message ?? e) } } },
+  })
+
+  tool({
+    name: 'bili_reply',
+    description: '在视频下发评论（或回复某条评论）。🔴 安全闸：设置页「自动评论并 @」默认关；关着时拒绝——除非本人当场让你发（传 force: true）。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号' },
+      text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
+      rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
+      force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
+    },
+    async execute(args) {
+      const commentOn = Boolean(cfg.biliAutoComment && cfg.biliMentionName)
+      if (!commentOn && !args.force) {
+        return { ok: false, blocked: true, hint: '要发评论得同时满足：设置里开「自动评论并 @」且填了「要 @ 谁」；或本人当场让你发时传 force: true。' }
+      }
+      try { return await biliCall('bili_reply', { bvid: String(args.bvid ?? ''), text: String(args.text ?? ''), rpid: Number(args.rpid) || 0 }) }
+      catch (e) { return { ok: false, error: String(e?.message ?? e) } }
+    },
+  })
+
+  tool({
+    name: 'bili_login_start',
+    description: '开始 B站 扫码登录：出二维码（PNG 存在插件家目录，返回路径）+ key。拿到 PNG 用 present 推给本人扫，再调 bili_login_poll 轮询。二维码约 180 秒有效。',
+    parameters: {},
+    async execute() { return await biliLoginStart() },
+  })
+
+  tool({
+    name: 'bili_login_poll',
+    description: '查扫码结果：waiting 还没扫 / scanned 扫了待确认 / ok 成功 / expired 过期。成功自动写凭证。',
+    parameters: { key: { type: 'string', description: 'bili_login_start 给的那个 key' } },
+    async execute(args) { return await biliLoginPoll(String(args.key ?? '')) },
+  })
+
+  tool({
+    name: 'bili_setup',
+    description: '给 B站 装运行环境（建 venv 装 Python MCP 依赖）。第一次用之前跑一次，起完就返回不等装完，进度看 install.log。',
+    parameters: {},
+    async execute() { return biliSetup() },
+  })
+
+  tool({
+    name: 'bili_status',
+    description: '看 B站 源的当前状态：环境装没装、登录没、今天逛没、额度多少。',
+    parameters: {},
+    async execute() {
+      refreshCfg()
+      return {
+        ok: true,
+        venvReady: bili.venvReadyNow(stateDir),
+        loggedIn: biliHasCredential(),
+        perDay: cfg.biliPerDay, autoComment: cfg.biliAutoComment, mentionName: cfg.biliMentionName,
+        replyToComments: cfg.biliReplyToComments, dmMode: cfg.biliDmMode, dmUid: cfg.biliDmUid,
+        keywords: cfg.biliKeywords, home: stateDir,
+      }
+    },
+  })
+
   // ── 手动触发 + 状态（走 HTTP，供设置页按钮用） ──
   const sendJson = (res, code, obj) => {
     try {
@@ -493,6 +712,40 @@ export function apply(ctx, config) {
     }
     if (sub === '/review' && req.method === 'POST') return sendJson(res, 200, await doReview('manual'))
     if (sub === '/browse' && req.method === 'POST') return sendJson(res, 200, await doBrowse('manual'))
+    // ── B站 / 网站源 ──
+    if (sub === '/site/status' && req.method === 'GET') {
+      refreshCfg()
+      return sendJson(res, 200, {
+        ok: true,
+        bili: {
+          venvReady: bili.venvReadyNow(stateDir),
+          loggedIn: biliHasCredential(),
+          perDay: cfg.biliPerDay, autoComment: cfg.biliAutoComment, mentionName: cfg.biliMentionName,
+          replyToComments: cfg.biliReplyToComments, dmMode: cfg.biliDmMode, dmUid: cfg.biliDmUid,
+          keywords: cfg.biliKeywords, installing: biliInstalling,
+        },
+        customSites: readCustomSites().map((s) => ({ id: s.id, name: s.name, transport: s.transport })),
+      })
+    }
+    if (sub === '/site/setup' && req.method === 'POST') return sendJson(res, 200, biliSetup())
+    if (sub === '/site/login/start' && req.method === 'POST') return sendJson(res, 200, await biliLoginStart())
+    if (sub === '/site/login/poll' && req.method === 'POST') {
+      const body = await readBody(req)
+      return sendJson(res, 200, await biliLoginPoll(String(body?.key || '')))
+    }
+    // 二维码 PNG 直出（img 标签直接指这个路由）
+    if (sub === '/site/qr' && req.method === 'GET') {
+      const pngPath = join(stateDir, 'qrcode_login.png')
+      try {
+        const buf = readFileSync(pngPath)
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' })
+        res.end(buf)
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'text/plain' })
+        res.end('no qr yet')
+      }
+      return
+    }
     return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${sub}` })
   }
 

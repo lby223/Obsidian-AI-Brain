@@ -114,6 +114,9 @@ window.__ModuleLoader__.load({
       const [log, setLog] = React.useState(null)   // null = 未展开
       // 输入框绑本地草稿，别直接绑 cfg（页面轮询会冲掉正在打的字）
       const [draft, setDraft] = React.useState(null)  // null = 还没从 cfg 初始化
+      // B站 源状态
+      const [biliSt, setBiliSt] = React.useState(null)
+      const [biliQr, setBiliQr] = React.useState('')
 
       React.useEffect(() => {
         let alive = true
@@ -123,6 +126,20 @@ window.__ModuleLoader__.load({
             if (!alive) return
             if (d && d.ok) { setSt(d); setFails(0) } else setFails((n) => n + 1)
           } catch { if (alive) setFails((n) => n + 1) }
+        }
+        tick()
+        const t = setInterval(tick, 5000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+
+      // B站 源状态（每 5 秒拉一次）
+      React.useEffect(() => {
+        let alive = true
+        const tick = async () => {
+          try {
+            const d = await jget('/site/status')
+            if (alive && d && d.ok) setBiliSt(d)
+          } catch { /* 读不到就算了 */ }
         }
         tick()
         const t = setInterval(tick, 5000)
@@ -140,6 +157,7 @@ window.__ModuleLoader__.load({
             reviewTime: cfg.reviewTime || '23:00',
             browseTime: cfg.browseTime || '',
             browseEndTime: cfg.browseEndTime || '',
+            biliMentionName: cfg.biliMentionName || '',
           })
         }
       }, [cfg, draft])
@@ -151,7 +169,7 @@ window.__ModuleLoader__.load({
         setBusy('save')
         try {
           const p = {}
-          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime']) {
+          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime', 'biliMentionName']) {
             if (draft && k in draft) p[k] = draft[k]
           }
           const r = await jpost('/config', p)
@@ -188,6 +206,36 @@ window.__ModuleLoader__.load({
         } catch (e) { setLog('读不到日志：' + String(e?.message ?? e)) } finally { setBusy('') }
       }
 
+      const onBiliSetup = async () => {
+        setBusy('bilisetup'); say('')
+        try {
+          const r = await jpost('/site/setup', {})
+          if (r && r.ok) say('环境开始装（几分钟），进度看日志；装好会记下 python 路径', 'good')
+          else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onBiliLogin = async () => {
+        setBusy('bililogin'); say('')
+        try {
+          const r = await jpost('/site/login/start', {})
+          if (r && r.ok) { setBiliQr(r.key); say('二维码已生成，用手机 B站 扫；约 180 秒有效', 'good') }
+          else say('出码失败：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onBiliPoll = async () => {
+        setBusy('bilipoll'); say('')
+        try {
+          const r = await jpost('/site/login/poll', { key: biliQr })
+          if (r && r.ok && r.state === 'ok') { setBiliQr(''); say('登录成功 ✓', 'good') }
+          else if (r && r.state === 'waiting') say('还没扫，等手机扫一下', '')
+          else if (r && r.state === 'scanned') say('扫了，去手机点「确认登录」', '')
+          else if (r && r.state === 'expired') { setBiliQr(''); say('二维码过期了，重新点「扫码登录」', 'warn') }
+          else say((r && r.message) || (r && r.error) || '查不到结果', 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
       if (!st || !cfg) {
         return h('div', { 'data-ab-page': '' },
           h('div', { 'data-ab-note': '' }, fails >= 3
@@ -197,6 +245,8 @@ window.__ModuleLoader__.load({
 
       const sw = (k) => Boolean(cfg[k])
       const modelOk = Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model)
+      const biliVenvReady = Boolean(biliSt && biliSt.bili && biliSt.bili.venvReady)
+      const biliLoggedIn = Boolean(biliSt && biliSt.bili && biliSt.bili.loggedIn)
 
       return h('div', { 'data-ab-page': '' },
 
@@ -268,6 +318,37 @@ window.__ModuleLoader__.load({
         h('div', { 'data-ab-row': '' },
           h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存'),
           h('div', { 'data-ab-note': '' }, '库路径 / 模型三件套 / 两个时间在改完后点「保存」生效；开关和偏好即时生效。')),
+
+        /* ── B站（网站源） ── */
+        h('div', { 'data-ab-h': '' }, 'B站（网站源）'),
+        h('div', { 'data-ab-row': '' },
+          h('span', { 'data-ab-badge': '' }, biliVenvReady ? '环境已就绪' : '环境未装'),
+          h('span', { 'data-ab-badge': '' }, biliLoggedIn ? '已登录' : '未登录'),
+          h('div', { 'data-ab-grow': '' }),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup', onClick: onBiliSetup }, '装 B站 环境'),
+          biliLoggedIn
+            ? null
+            : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录')),
+        biliQr
+          ? h('div', { 'data-ab-row': '' },
+              h('img', { src: '/api/ai-brain/site/qr', alt: '扫码登录二维码', style: { width: 160, height: 160, borderRadius: 8 } }),
+              h('div', { 'data-ab-grow': '' },
+                h('div', { 'data-ab-note': '' }, '手机 B站 → 我的 → 扫一扫。扫完点「查扫码结果」。'),
+                h('button', { 'data-ab-btn': '', disabled: busy === 'bilipoll', onClick: onBiliPoll }, '查扫码结果')))
+          : null,
+        h(ToggleRow, {
+          label: '自动评论并 @',
+          note: '开着时逛到值得的视频会发评论 @ 你（默认关，账号操作手动开）',
+          on: sw('biliAutoComment'),
+          onChange: (v) => { jpost('/config', { biliAutoComment: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+        }),
+        h(Field, { label: '要 @ 谁', note: 'B站 昵称（自动评论时 @ 这个人）', value: draft?.biliMentionName, onChange: (v) => set('biliMentionName', v), placeholder: '昵称' }),
+        h(ToggleRow, {
+          label: '回复评论',
+          note: '有人回复你那条评论时回一句（默认关）',
+          on: sw('biliReplyToComments'),
+          onChange: (v) => { jpost('/config', { biliReplyToComments: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+        }),
 
         /* ── 日志 ── */
         log !== null ? h('pre', { 'data-ab-pre': '' }, log) : null,

@@ -15,3 +15,11 @@
         browseEnabled: false
         browseTime: ""
         browseMode: "off"
+        biliPerDay: 5
+        biliAutoComment: false
+        biliMentionName: ""
+        biliReplyToComments: false
+        biliDmMode: "off"
+        biliDmUid: 0
+        biliKeywords: ""
+        customSites: ""
