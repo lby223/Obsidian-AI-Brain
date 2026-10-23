@@ -1,5 +1,5 @@
 /**
- * client.js —— 浏览器半端（设置在「设置」里的一页）
+ * client.js —— 浏览器半端（设置在「设置」里的一页，分 4 个 tab）
  * ============================================================================
  * ⭐ client bundle 不是 ESM，是自注册脚本（抄 dsh-bili-scroll 的约定）：
  *
@@ -14,11 +14,15 @@
  *       () => h(Panel),
  *     ))
  *
- * 这一页做四件事（用户 m01308 要的「更丰富的界面」）：
- *   ① 状态徽标（版本 / 库是否配置 / 模型是否配好 / 今天复盘没 / 逛没）
- *   ② 核心配置表单（vaultPath + 复盘三件套 + 复盘时间 + 逛互联网开关）
- *   ③ 「现在复盘」「现在逛」两个手动按钮
- *   ④ 日志查看（末尾 200 行）
+ * 这一页分 4 个 tab（用户 m02265 嫌一页往下拉太多）：
+ *   ① 概览     —— 状态徽标 + 三个手动按钮（现在复盘/现在逛/看日志）+ 进行中进度 + 日志
+ *   ② 记忆     —— 知识库路径 + 每日复盘（开关/时间）+ 复盘模型三件套 + 保存
+ *   ③ 逛互联网 —— 开关/逛时间/结束时间/浏览偏好
+ *   ④ 网站源   —— B站（环境/登录徽标、扫码登录、逛B站、账号开关）+ 自定义网站源
+ *
+ * 执行类动作（复盘/逛互联网/装B站环境）加「进行中」进度反馈：
+ *   - 后端 /status 返回 jobs（每类任务的 running 阶段），前端据此显示进度条/进行中徽标
+ *   - 真百分比做不了（headless 会话是黑盒），但「启动中→运行中→完成/失败」阶段可见
  *
  * 所有读写都走宿主 HTTP 接口 /api/ai-brain/*，浏览器只跟本机说话。
  * ============================================================================
@@ -43,7 +47,12 @@ window.__ModuleLoader__.load({
     }))
 
     const CSS = `
-[data-ab-page]{display:flex;flex-direction:column;gap:16px;padding:2px 2px 8px;max-width:640px;}
+[data-ab-page]{display:flex;flex-direction:column;gap:16px;padding:2px 2px 8px;max-width:680px;}
+[data-ab-tabs]{display:flex;gap:4px;border-bottom:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));padding-bottom:0;}
+[data-ab-tab]{padding:8px 14px;font-size:13px;cursor:pointer;border:none;background:none;color:var(--dsw-alias-label-secondary,#c9ccd1);
+  border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;}
+[data-ab-tab]:hover{color:inherit;}
+[data-ab-tab][data-active]{color:#3b82f6;border-bottom-color:#3b82f6;font-weight:600;}
 [data-ab-row]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 [data-ab-grow]{flex:1;min-width:0;}
 [data-ab-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
@@ -65,9 +74,15 @@ window.__ModuleLoader__.load({
 [data-ab-msg][data-good]{color:#22c55e;}
 [data-ab-badge]{font-size:11px;padding:2px 7px;border-radius:6px;
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-ab-badge][data-live]{color:#22c55e;}
 [data-ab-pre]{margin:6px 0 0;padding:8px 9px;border-radius:8px;max-height:240px;overflow:auto;font-size:11px;
   line-height:15px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-layer-4,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+/* ── 进度条 ── */
+[data-ab-progress]{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.18));overflow:hidden;flex:1;min-width:80px;}
+[data-ab-progress] i{display:block;height:100%;background:#3b82f6;border-radius:3px;transition:width .3s ease;}
+[data-ab-progress][data-indeterminate] i{width:40% !important;animation:abind 1.1s ease-in-out infinite;}
+@keyframes abind{0%{margin-left:-40%}100%{margin-left:100%}}
 /* ── 开关 Switch：滑块式，开=蓝+滑块右移，关=灰+滑块左移 ── */
 [data-ab-sw]{position:relative;width:40px;height:22px;border-radius:11px;cursor:pointer;flex-shrink:0;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
@@ -105,7 +120,18 @@ window.__ModuleLoader__.load({
           })))
     }
 
+    // 进度条：percent 0-100；indeterminate=true 时跑不确定动画（后台任务没精确进度）
+    function Progress({ label, percent, indeterminate }) {
+      return h('div', { 'data-ab-row': '' },
+        h('div', { 'data-ab-label': '' }, label),
+        h('div', {
+          'data-ab-progress': '',
+          'data-indeterminate': indeterminate ? '' : undefined,
+        }, h('i', { style: { width: (percent || 0) + '%' } })))
+    }
+
     function Panel() {
+      const [tab, setTab] = React.useState('overview')
       const [st, setSt] = React.useState(null)
       const [fails, setFails] = React.useState(0)
       const [busy, setBusy] = React.useState('')
@@ -158,6 +184,7 @@ window.__ModuleLoader__.load({
             browseTime: cfg.browseTime || '',
             browseEndTime: cfg.browseEndTime || '',
             biliMentionName: cfg.biliMentionName || '',
+            customSites: cfg.customSites || '',
           })
         }
       }, [cfg, draft])
@@ -169,7 +196,7 @@ window.__ModuleLoader__.load({
         setBusy('save')
         try {
           const p = {}
-          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime', 'biliMentionName']) {
+          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime', 'biliMentionName', 'customSites']) {
             if (draft && k in draft) p[k] = draft[k]
           }
           const r = await jpost('/config', p)
@@ -179,7 +206,7 @@ window.__ModuleLoader__.load({
       }
 
       const onReview = async () => {
-        setBusy('review'); say('')
+        setBusy('review'); say('复盘进行中…（收件箱 → 调模型归类 → 写库，完成会告诉你）')
         try {
           const r = await jpost('/review', {})
           if (r && r.ok) say(`复盘完成：写入 ${(r.notes || []).length} 篇${r.archived ? '，收件箱已归档' : ''}`, 'good')
@@ -192,7 +219,7 @@ window.__ModuleLoader__.load({
         setBusy('browse'); say('')
         try {
           const r = await jpost('/browse', {})
-          if (r && r.ok) say('已经在后台逛了，日志见下方「日志」', 'good')
+          if (r && r.ok) say('已经在后台逛了，日志见「概览」页', 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -207,10 +234,10 @@ window.__ModuleLoader__.load({
       }
 
       const onBiliSetup = async () => {
-        setBusy('bilisetup'); say('')
+        setBusy('bilisetup'); say('环境开始装（几分钟，后台跑），进度看「概览」日志')
         try {
           const r = await jpost('/site/setup', {})
-          if (r && r.ok) say('环境开始装（几分钟），进度看日志；装好会记下 python 路径', 'good')
+          if (r && r.ok) say('环境开始装（几分钟），装好会记下 python 路径', 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -240,7 +267,7 @@ window.__ModuleLoader__.load({
         setBusy('bilibrowse'); say('')
         try {
           const r = await jpost('/site/browse', { site: 'bili' })
-          if (r && r.ok) say('已经在后台逛 B站 了，笔记会落 3.探索/bili/，日志见下方「日志」', 'good')
+          if (r && r.ok) say('已经在后台逛 B站 了，笔记会落 3.探索/bili/，日志见「概览」页', 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -256,24 +283,53 @@ window.__ModuleLoader__.load({
       const modelOk = Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model)
       const biliVenvReady = Boolean(biliSt && biliSt.bili && biliSt.bili.venvReady)
       const biliLoggedIn = Boolean(biliSt && biliSt.bili && biliSt.bili.loggedIn)
+      const biliInstalling = Boolean(biliSt && biliSt.bili && biliSt.bili.installing)
 
-      return h('div', { 'data-ab-page': '' },
+      // jobs：后端返回的进行中任务（用于进度反馈）
+      const jobs = st.jobs || {}
+      const reviewing = Boolean(jobs.review)
+      const browsing = Boolean(st.browsing || jobs.browse)
+      const installing = Boolean(biliInstalling || jobs.bilisetup)
 
-        /* ── 状态徽标 + 手动按钮 ── */
+      const TABS = [
+        { id: 'overview', label: '概览' },
+        { id: 'memory', label: '记忆' },
+        { id: 'browse', label: '逛互联网' },
+        { id: 'sites', label: '网站源' },
+      ]
+
+      const tabBar = h('div', { 'data-ab-tabs': '' },
+        TABS.map((t) => h('button', {
+          key: t.id, 'data-ab-tab': '', 'data-active': tab === t.id ? '' : undefined,
+          onClick: () => setTab(t.id),
+        }, t.label)))
+
+      const msgEl = msg ? h('div', { 'data-ab-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null
+
+      // ── 概览页：状态徽标 + 进行中进度 + 手动按钮 + 日志 ──
+      const overview = h('div', {},
         h('div', { 'data-ab-row': '' },
           h('span', { 'data-ab-badge': '' }, 'v' + (st.version || '?')),
           h('span', { 'data-ab-badge': '' }, cfg.vaultPath ? '库已配置' : '库未配置'),
           h('span', { 'data-ab-badge': '' }, modelOk ? '模型已配' : '模型未配'),
           h('span', { 'data-ab-badge': '' }, st.reviewedToday ? '今天已复盘' : '今天未复盘'),
-          h('span', { 'data-ab-badge': '' }, st.browsing ? '逛互联网进行中' : ''),
-          h('div', { 'data-ab-grow': '' }),
-          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'review', onClick: onReview }, '现在复盘'),
-          h('button', { 'data-ab-btn': '', disabled: busy === 'browse', onClick: onBrowse }, '现在逛'),
+          browsing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 逛互联网进行中') : null),
+        msgEl,
+
+        reviewing ? h(Progress, { label: '复盘进行中', indeterminate: true }) : null,
+        browsing ? h(Progress, { label: '逛互联网进行中', indeterminate: true }) : null,
+        installing ? h(Progress, { label: 'B站 环境安装中（后台）', indeterminate: true }) : null,
+
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'review' || reviewing, onClick: onReview }, '现在复盘'),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'browse' || browsing, onClick: onBrowse }, '现在逛'),
           h('button', { 'data-ab-btn': '', disabled: busy === 'log', onClick: onLog }, log !== null ? '收起日志' : '看日志')),
 
-        msg ? h('div', { 'data-ab-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null,
+        log !== null ? h('pre', { 'data-ab-pre': '' }, log) : null,
+      )
 
-        /* ── 库 ── */
+      // ── 记忆页：库路径 + 每日复盘 + 复盘模型 ──
+      const memory = h('div', {},
         h('div', { 'data-ab-h': '' }, '知识库'),
         h(Field, {
           label: '库路径（vaultPath）',
@@ -282,13 +338,12 @@ window.__ModuleLoader__.load({
           placeholder: 'C:\\知识库\\My Brain',
         }),
 
-        /* ── 复盘 ── */
         h('div', { 'data-ab-h': '' }, '每日复盘'),
         h(ToggleRow, {
           label: '开启每日复盘',
           note: '到点自动读当天草稿 → 调模型归类写库（像睡前总结）',
           on: sw('reviewEnabled'),
-          onChange: (v) => { /* 立即存，开关类走 persistCfg */ jpost('/config', { reviewEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+          onChange: (v) => { jpost('/config', { reviewEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
         h(Field, {
           label: '复盘时间', note: '格式 HH:mm，到点自动跑（每天一次）',
@@ -296,13 +351,18 @@ window.__ModuleLoader__.load({
           placeholder: '23:00',
         }),
 
-        /* ── 模型 ── */
         h('div', { 'data-ab-h': '' }, '复盘模型（OpenAI 兼容接口）'),
         h(Field, { label: 'apiBaseUrl', note: '如 https://api.deepseek.com/v1', value: draft?.apiBaseUrl, onChange: (v) => set('apiBaseUrl', v), placeholder: 'https://api.deepseek.com/v1' }),
         h(Field, { label: 'apiKey', note: '密钥，只存本机 config.json', value: draft?.apiKey, onChange: (v) => set('apiKey', v), placeholder: 'sk-...' }),
         h(Field, { label: 'model', note: '如 deepseek-chat', value: draft?.model, onChange: (v) => set('model', v), placeholder: 'deepseek-chat' }),
 
-        /* ── 逛互联网 ── */
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存'),
+          h('div', { 'data-ab-note': '' }, '库路径 / 模型三件套 / 两个时间在改完后点「保存」生效；开关即时生效。')),
+      )
+
+      // ── 逛互联网页 ──
+      const browse = h('div', {},
         h('div', { 'data-ab-h': '' }, 'AI 逛互联网'),
         h(ToggleRow, {
           label: '开启逛互联网',
@@ -322,19 +382,18 @@ window.__ModuleLoader__.load({
           },
             h('option', { value: 'off' }, 'off —— 自由逛'),
             h('option', { value: 'kb' }, 'kb —— 贴近知识库'))),
+        browsing ? h(Progress, { label: '逛互联网进行中', indeterminate: true }) : null,
+      )
 
-        /* ── 保存 ── */
-        h('div', { 'data-ab-row': '' },
-          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存'),
-          h('div', { 'data-ab-note': '' }, '库路径 / 模型三件套 / 两个时间在改完后点「保存」生效；开关和偏好即时生效。')),
-
-        /* ── B站（网站源） ── */
-        h('div', { 'data-ab-h': '' }, 'B站（网站源）'),
+      // ── 网站源页：B站 + 自定义 ──
+      const sites = h('div', {},
+        h('div', { 'data-ab-h': '' }, 'B站（内置网站源）'),
         h('div', { 'data-ab-row': '' },
           h('span', { 'data-ab-badge': '' }, biliVenvReady ? '环境已就绪' : '环境未装'),
           h('span', { 'data-ab-badge': '' }, biliLoggedIn ? '已登录' : '未登录'),
+          installing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 装环境中') : null,
           h('div', { 'data-ab-grow': '' }),
-          h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup', onClick: onBiliSetup }, '装 B站 环境'),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup' || installing, onClick: onBiliSetup }, '装 B站 环境'),
           biliLoggedIn
             ? h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bilibrowse', onClick: onBiliBrowse }, '逛 B站')
             : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录')),
@@ -359,9 +418,24 @@ window.__ModuleLoader__.load({
           onChange: (v) => { jpost('/config', { biliReplyToComments: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
 
-        /* ── 日志 ── */
-        log !== null ? h('pre', { 'data-ab-pre': '' }, log) : null,
+        h('div', { 'data-ab-h': '' }, '自定义网站源（MCP）'),
+        h('div', { 'data-ab-note': '' }, '贴 JSON 数组，每个是一个 MCP 网站源。只允许 stdio / streamable-http，禁止 shell 拼接。'),
+        h('textarea', {
+          'data-ab-input': '', rows: 6, style: { fontFamily: 'monospace', resize: 'vertical' },
+          value: draft?.customSites || '', placeholder: '[]',
+          onChange: (e) => set('customSites', e.target.value),
+        }),
+        h('div', { 'data-ab-note': '' }, '示例：{"id":"mysite","name":"我的站","transport":"streamable-http","url":"http://127.0.0.1:9999/mcp"} 或 stdio 用 command+args。'),
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存网站源')),
       )
+
+      const body = tab === 'overview' ? overview
+        : tab === 'memory' ? memory
+        : tab === 'browse' ? browse
+        : sites
+
+      return h('div', { 'data-ab-page': '' }, tabBar, body)
     }
 
     return {

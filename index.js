@@ -295,6 +295,12 @@ export function apply(ctx, config) {
   const readState = () => readJson(stateFile, {})
   const bumpState = (patch) => writeJson(stateFile, { ...readState(), ...patch })
 
+  // ── 进行中任务表（供设置页进度条用） ──
+  // 每类任务一个键：review / browse / bilisetup；值为 { startedAt } 或 null（没在跑）
+  const jobs = { review: null, browse: null, bilisetup: null }
+  const jobStart = (k) => { jobs[k] = { startedAt: Date.now() } }
+  const jobEnd = (k) => { jobs[k] = null }
+
   const reviewToday = () => {
     const today = vault.dayKey()
     return readState().reviewed?.[today] === true
@@ -307,11 +313,13 @@ export function apply(ctx, config) {
     if (!cfg.apiBaseUrl || !cfg.apiKey || !cfg.model) return { ok: false, error: '复盘模型没配全（apiBaseUrl / apiKey / model）' }
     const today = vault.dayKey()
     log(`复盘开始（${why}）`)
+    jobStart('review')
     const r = await runReview({
       vaultPath: cfg.vaultPath,
       apiBaseUrl: cfg.apiBaseUrl, apiKey: cfg.apiKey, model: cfg.model, reviewPrompt: cfg.reviewPrompt,
       log,
     })
+    jobEnd('review')
     if (r.ok) {
       bumpState({ reviewed: { ...(readState().reviewed || {}), [today]: true }, lastReviewAt: new Date().toISOString() })
       log(`复盘完成：写入 ${r.notes.length} 篇${r.archived ? '，收件箱已归档' : ''}`)
@@ -455,6 +463,7 @@ export function apply(ctx, config) {
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
     const cli = findDshCli()
     if (!cli) { log('逛互联网没跑：找不到 dsh cli'); return { ok: false, error: '找不到 dsh cli' } }
+    jobStart('browse')
 
     // 逛指定网站 vs 自由逛
     const siteDir = site ? site.id : '综合'
@@ -509,6 +518,7 @@ export function apply(ctx, config) {
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
       browseChild = null
+      jobEnd('browse')
       log(`逛互联网结束（code=${code}）`)
       // 把 headless 会话产出的笔记搬进知识库 3.探索/<站点>/（宿主不受沙箱限制，能写知识库）
       let moved = 0
@@ -533,7 +543,7 @@ export function apply(ctx, config) {
       if (site) bumpState({ siteBrowsed: { ...(readState().siteBrowsed || {}), [`${site.id}:${vault.dayKey()}`]: true } })
       else bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
     })
-    child.on('error', (e) => log(`逛互联网起不来：${e?.message ?? e}`))
+    child.on('error', (e) => { jobEnd('browse'); log(`逛互联网起不来：${e?.message ?? e}`) })
     return { ok: true, started: true }
   }
 
@@ -592,12 +602,14 @@ export function apply(ctx, config) {
   const biliSetup = () => {
     if (biliInstalling) return { ok: true, busy: true, hint: '正在装，别重复起' }
     biliInstalling = true
+    jobStart('bilisetup')
     const r = bili.runInstall({
       pluginDir, stateDir,
       pythonPath: cfg.biliPythonPath || 'python',
       log,
       onReady: (venvPy) => {
         biliInstalling = false
+        jobEnd('bilisetup')
         // 写进 config.json（pythonPath 由插件自算，走本地优先）
         try {
           const cur = readJson(cfgFile, {})
@@ -793,6 +805,7 @@ export function apply(ctx, config) {
         browseEndTime: cfg.browseEndTime, browsing: Boolean(browseChild),
         browseMode: cfg.browseMode, browsedToday: browseToday(), browsing: Boolean(browseChild),
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
+        jobs: { ...jobs },
         config: { ...cfg }, // 完整配置（apiKey 也带，本机同源 fetch，设置页要回显）
       })
     }
