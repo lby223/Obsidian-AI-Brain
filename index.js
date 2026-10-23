@@ -104,6 +104,17 @@ export function apply(ctx, config) {
   const readJson = (file, fb) => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return fb } }
   const writeJson = (file, v) => { try { writeFileSync(file, JSON.stringify(v, null, 2), 'utf8') } catch { /* 忽略 */ } }
 
+  // 该用哪个 Python 跑 B站 的活（画二维码 / 起 MCP）：
+  //   ① 插件自己记下的 venv python（装环境时写进 config.json）
+  //   ② 家里 venv 的 python（依赖装好就存在）——收敛到这一条，别退回系统 python
+  //   ③ 都没有才退回 'python'
+  // ⚠️ 系统 Python 3.15 里没有 qrcode，直接用它画二维码会静默失败（面板上就是个裂图）。
+  const venvPyPath = () => process.platform === 'win32'
+    ? join(stateDir, '.venv', 'Scripts', 'python.exe')
+    : join(stateDir, '.venv', 'bin', 'python')
+  const biliPython = () => cfg.biliPythonPath
+    || (bili.venvReadyNow(stateDir) ? venvPyPath() : 'python')
+
   const normalize = (src, base) => {
     const out = { ...base }
     for (const k of Object.keys(base)) {
@@ -406,9 +417,7 @@ export function apply(ctx, config) {
     } catch { /* 拿不到就跳过 */ }
 
     if (site?.id === 'bili') {
-      const py = cfg.biliPythonPath || (bili.venvReadyNow(stateDir)
-        ? (process.platform === 'win32' ? join(stateDir, '.venv', 'Scripts', 'python.exe') : join(stateDir, '.venv', 'bin', 'python'))
-        : 'python')
+      const py = biliPython()
       lines.push(`- insert:`)
       lines.push(`    - id: mcp-bili-duty`)
       lines.push(`      name: '@deepseek-ai/dsh-mcp-client'`)
@@ -588,9 +597,7 @@ export function apply(ctx, config) {
   // 起 B站 MCP（venv 没装好会抛错；调用方 catch）
   const ensureBiliMcp = async () => {
     if (biliMcp?.running) return biliMcp
-    const py = cfg.biliPythonPath || (bili.venvReadyNow(stateDir)
-      ? (process.platform === 'win32' ? join(stateDir, '.venv', 'Scripts', 'python.exe') : join(stateDir, '.venv', 'bin', 'python'))
-      : 'python')
+    const py = biliPython()
     biliMcp = bili.spawnBiliMcp({ pythonPath: py, stateDir, log })
     return biliMcp
   }
@@ -605,7 +612,7 @@ export function apply(ctx, config) {
     jobStart('bilisetup')
     const r = bili.runInstall({
       pluginDir, stateDir,
-      pythonPath: cfg.biliPythonPath || 'python',
+      pythonPath: biliPython(),
       log,
       onReady: (venvPy) => {
         biliInstalling = false
@@ -624,7 +631,7 @@ export function apply(ctx, config) {
   const biliLoginStart = async () => {
     try {
       const { key, url } = await login.loginStart()
-      const png = await login.renderQrPng(cfg.biliPythonPath || 'python', stateDir, url)
+      const png = await login.renderQrPng(biliPython(), stateDir, url, [venvPyPath()])
       return {
         ok: true, key, url, png,
         hint: png ? '用 present 把这张 PNG 推给本人扫；扫完调 bili_login_poll（或面板点「查扫码」）' : '没画出 PNG：先点「装 B站 环境」（venv 里要有 qrcode）',
@@ -802,7 +809,7 @@ export function apply(ctx, config) {
         vault: cfg.vaultPath || '',
         reviewEnabled: cfg.reviewEnabled, reviewTime: cfg.reviewTime,
         reviewedToday: reviewToday(), browseEnabled: cfg.browseEnabled, browseTime: cfg.browseTime,
-        browseEndTime: cfg.browseEndTime, browsing: Boolean(browseChild),
+        browseEndTime: cfg.browseEndTime,
         browseMode: cfg.browseMode, browsedToday: browseToday(), browsing: Boolean(browseChild),
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
         jobs: { ...jobs },

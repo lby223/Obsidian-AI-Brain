@@ -261,7 +261,8 @@ window.__ModuleLoader__.load({
         setBusy('bililogin'); say('')
         try {
           const r = await jpost('/site/login/start', {})
-          if (r && r.ok) { setBiliQr(r.key); say('二维码已生成，用手机 B站 扫；约 180 秒有效', 'good') }
+          if (r && r.ok && r.png) { setBiliQr(r.key); say('二维码已生成，用手机 B站 扫；约 180 秒有效', 'good') }
+          else if (r && r.ok) { setBiliQr(''); say('没画出二维码：' + (r.hint || '先点「装 B站 环境」（venv 里要有 qrcode）'), 'warn') }
           else say('出码失败：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -329,8 +330,6 @@ window.__ModuleLoader__.load({
           h('span', { 'data-ab-badge': '' }, modelOk ? '模型已配' : '模型未配'),
           h('span', { 'data-ab-badge': '' }, st.reviewedToday ? '今天已复盘' : '今天未复盘'),
           browsing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 逛互联网进行中') : null),
-        msgEl,
-
         reviewing ? h(Progress, { label: '复盘进行中', indeterminate: true }) : null,
         browsing ? h(Progress, { label: '逛互联网进行中', indeterminate: true }) : null,
         installing ? h(Progress, { label: 'B站 环境安装中（后台）', indeterminate: true }) : null,
@@ -414,7 +413,7 @@ window.__ModuleLoader__.load({
             : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录')),
         biliQr
           ? h('div', { 'data-ab-row': '' },
-              h('img', { src: '/api/ai-brain/site/qr', alt: '扫码登录二维码', style: { width: 160, height: 160, borderRadius: 8 } }),
+              h('img', { src: '/api/ai-brain/site/qr?k=' + encodeURIComponent(biliQr), alt: '扫码登录二维码', style: { width: 160, height: 160, borderRadius: 8, background: '#fff' } }),
               h('div', { 'data-ab-grow': '' },
                 h('div', { 'data-ab-note': '' }, '手机 B站 → 我的 → 扫一扫。扫完点「查扫码结果」。'),
                 h('button', { 'data-ab-btn': '', disabled: busy === 'bilipoll', onClick: onBiliPoll }, '查扫码结果')))
@@ -450,7 +449,7 @@ window.__ModuleLoader__.load({
         : tab === 'browse' ? browse
         : sites
 
-      return h('div', { 'data-ab-page': '' }, tabBar, body)
+      return h('div', { 'data-ab-page': '' }, tabBar, msgEl, body)
     }
 
     return {
