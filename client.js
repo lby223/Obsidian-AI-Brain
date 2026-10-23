@@ -97,6 +97,17 @@ window.__ModuleLoader__.load({
 [data-ab-sw][disabled]{opacity:.5;cursor:default;}
 `
 
+    // epoch ms → 'HH:mm'
+    const hmOf = (ms) => {
+      const d = new Date(Number(ms))
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    }
+    // 还剩多久：'只剩 7 分钟' / '马上到点'
+    const leftOf = (ms) => {
+      const m = Math.round((Number(ms) - Date.now()) / 60000)
+      return m <= 0 ? '马上到点' : `还剩 ${m} 分钟`
+    }
+
     function Switch({ on, onChange, disabled }) {
       return h('button', {
         'data-ab-sw': '', 'data-on': on ? '' : undefined, disabled: Boolean(disabled),
@@ -198,6 +209,7 @@ window.__ModuleLoader__.load({
             reviewTime: cfg.reviewTime || '23:00',
             browseTime: cfg.browseTime || '',
             browseEndTime: cfg.browseEndTime || '',
+            browseMaxMinutes: cfg.browseMaxMinutes == null ? 20 : cfg.browseMaxMinutes,
             biliMentionName: cfg.biliMentionName || '',
             customSites: cfg.customSites || '',
           })
@@ -211,7 +223,7 @@ window.__ModuleLoader__.load({
         setBusy('save')
         try {
           const p = {}
-          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime', 'biliMentionName', 'customSites']) {
+          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime', 'browseMaxMinutes', 'biliMentionName', 'customSites']) {
             if (draft && k in draft) p[k] = draft[k]
           }
           const r = await jpost('/config', p)
@@ -234,8 +246,17 @@ window.__ModuleLoader__.load({
         setBusy('browse'); say('')
         try {
           const r = await jpost('/browse', {})
-          if (r && r.ok) say('已经在后台逛了，日志见「概览」页', 'good')
+          if (r && r.ok) say(`已经在后台逛了${r.endsAt ? '，' + hmOf(r.endsAt) + ' 自动收尾' : ''}，日志见「概览」页`, 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onBrowseStop = async () => {
+        setBusy('browsestop'); say('')
+        try {
+          const r = await jpost('/browse/stop', {})
+          if (r && r.ok) say(r.stopped ? '已停止逛互联网，本次产出已经收尾入库' : '当前没有在逛', r.stopped ? 'good' : '')
+          else say('停止没成：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -284,7 +305,7 @@ window.__ModuleLoader__.load({
         setBusy('bilibrowse'); say('')
         try {
           const r = await jpost('/site/browse', { site: 'bili' })
-          if (r && r.ok) say('已经在后台逛 B站 了，笔记会落 3.探索/bili/，日志见「概览」页', 'good')
+          if (r && r.ok) say(`已经在后台逛 B站 了${r.endsAt ? '，' + hmOf(r.endsAt) + ' 自动收尾' : ''}，笔记会落 3.探索/bili/，日志见「概览」页`, 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -333,11 +354,15 @@ window.__ModuleLoader__.load({
           browsing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 逛互联网进行中') : null),
         reviewing ? h(Progress, { label: '复盘进行中', indeterminate: true }) : null,
         browsing ? h(Progress, { label: '逛互联网进行中', indeterminate: true }) : null,
+        browsing && st.browseDeadline
+          ? h('div', { 'data-ab-note': '' }, `预计 ${hmOf(st.browseDeadline)} 自动收尾（${leftOf(st.browseDeadline)}）；想提前停就点右边「停止」`)
+          : null,
         installing ? h(Progress, { label: 'B站 环境安装中（后台）', indeterminate: true }) : null,
 
         h('div', { 'data-ab-row': '' },
           h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'review' || reviewing, onClick: onReview }, '现在复盘'),
           h('button', { 'data-ab-btn': '', disabled: busy === 'browse' || browsing, onClick: onBrowse }, '现在逛'),
+          browsing ? h('button', { 'data-ab-btn': '', disabled: busy === 'browsestop', onClick: onBrowseStop }, '停止') : null,
           h('button', { 'data-ab-btn': '', disabled: busy === 'log', onClick: onLog }, log ? '收起日志' : '看日志')),
 
         log ? h('pre', { 'data-ab-pre': '' }, log) : null,
@@ -386,7 +411,8 @@ window.__ModuleLoader__.load({
           onChange: (v) => { jpost('/config', { browseEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
         h(Field, { label: '逛的时间', note: 'HH:mm，到点自动开始（每天一次），留空 = 只手动逛', value: draft?.browseTime, onChange: (v) => set('browseTime', v), placeholder: '21:00' }),
-        h(Field, { label: '结束时间', note: 'HH:mm，到点强制收尾（没逛完也停）；留空 = 逛完自己停', value: draft?.browseEndTime, onChange: (v) => set('browseEndTime', v), placeholder: '21:30' }),
+        h(Field, { label: '结束时间（定时逛用）', note: 'HH:mm，到点强制收尾（没逛完也停）；留空 = 逛完自己停', value: draft?.browseEndTime, onChange: (v) => set('browseEndTime', v), placeholder: '21:30' }),
+        h(Field, { label: '单次最长（分钟）', note: '手动点「现在逛 / 逛 B站」时按这个算结束时间，到点自动收尾（1–180）', value: draft?.browseMaxMinutes, onChange: (v) => set('browseMaxMinutes', v), placeholder: '20' }),
         h('div', { 'data-ab-row': '' },
           h('div', { 'data-ab-grow': '' },
             h('div', { 'data-ab-label': '' }, '浏览偏好'),
@@ -398,6 +424,13 @@ window.__ModuleLoader__.load({
             h('option', { value: 'off' }, 'off —— 自由逛'),
             h('option', { value: 'kb' }, 'kb —— 贴近知识库'))),
         browsing ? h(Progress, { label: '逛互联网进行中', indeterminate: true }) : null,
+        browsing && st.browseDeadline
+          ? h('div', { 'data-ab-note': '' }, `预计 ${hmOf(st.browseDeadline)} 自动收尾（${leftOf(st.browseDeadline)}）`)
+          : null,
+        browsing
+          ? h('div', { 'data-ab-row': '' },
+              h('button', { 'data-ab-btn': '', disabled: busy === 'browsestop', onClick: onBrowseStop }, '停止这次逛'))
+          : null,
       )
 
       // ── 网站源页：B站 + 自定义 ──
@@ -410,8 +443,12 @@ window.__ModuleLoader__.load({
           h('div', { 'data-ab-grow': '' }),
           h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup' || installing, onClick: () => onBiliSetup(biliVenvReady) }, biliVenvReady ? '重装环境' : '装 B站 环境'),
           biliLoggedIn
-            ? h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bilibrowse', onClick: onBiliBrowse }, '逛 B站')
-            : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录')),
+            ? h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bilibrowse' || browsing, onClick: onBiliBrowse }, '逛 B站')
+            : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录'),
+          browsing ? h('button', { 'data-ab-btn': '', disabled: busy === 'browsestop', onClick: onBrowseStop }, '停止') : null),
+        browsing && st.browseDeadline
+          ? h('div', { 'data-ab-note': '' }, `正在逛，预计 ${hmOf(st.browseDeadline)} 收尾（${leftOf(st.browseDeadline)}）`)
+          : null,
         biliQr
           ? h('div', { 'data-ab-row': '' },
               h('img', { src: '/api/ai-brain/site/qr?k=' + encodeURIComponent(biliQr), alt: '扫码登录二维码', style: { width: 160, height: 160, borderRadius: 8, background: '#fff' } }),

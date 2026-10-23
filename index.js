@@ -47,6 +47,8 @@ export const Config = !z ? undefined : z.object({
   browseTime: z.string().default('').extra('volatile', true),
   browseEndTime: z.string().default('').extra('volatile', true),
   browseMode: z.string().default('off').extra('volatile', true),
+  // 单次「逛」最长跑多久（分钟）。手动逛（含逛指定网站）按这个算结束时间。
+  browseMaxMinutes: z.number().default(20).extra('volatile', true),
   // ── B站（网站源：内置）──
   biliPerDay: z.number().default(5).extra('volatile', true),
   biliAutoComment: z.boolean().default(false).extra('volatile', true),
@@ -66,6 +68,7 @@ const DEFAULTS = {
   reviewEnabled: true, reviewTime: '23:00',
   apiBaseUrl: '', apiKey: '', model: '', reviewPrompt: '',
   browseEnabled: false, browseTime: '', browseEndTime: '', browseMode: 'off',
+  browseMaxMinutes: 20,
   biliPerDay: 5, biliAutoComment: false, biliMentionName: '', biliReplyToComments: false,
   biliDmMode: 'off', biliDmUid: 0, biliKeywords: '', biliPythonPath: '',
   customSites: '',
@@ -149,6 +152,10 @@ export function apply(ctx, config) {
     if ('browseTime' in o) o.browseTime = normalizeHm(o.browseTime)
     if ('browseEndTime' in o) o.browseEndTime = normalizeHm(o.browseEndTime)
     if ('browseMode' in o) o.browseMode = ['off', 'kb'].includes(String(o.browseMode)) ? String(o.browseMode) : 'off'
+    if ('browseMaxMinutes' in o) {
+      const n = Number(o.browseMaxMinutes)
+      o.browseMaxMinutes = Number.isFinite(n) ? Math.max(1, Math.min(180, Math.round(n))) : 20
+    }
     if ('biliPerDay' in o) o.biliPerDay = Math.max(0, Math.min(Number(o.biliPerDay) || 0, 50))
     if ('biliAutoComment' in o) o.biliAutoComment = Boolean(o.biliAutoComment)
     if ('biliMentionName' in o) o.biliMentionName = String(o.biliMentionName || '').slice(0, 50)
@@ -368,6 +375,11 @@ export function apply(ctx, config) {
   //   加 --expose-internals 直接跑它——**别用 dsh.cmd + cmd /c**（.cmd 路径带空格会被截断成 'C:\DeepSeek'）。
   // 参考 dsh-bili-scroll：resolveDsh 返回 { command: process.execPath, args: [cli.js], shell: false }。
   const findDshCli = () => {
+    // ⓪ 显式指定（调试/自定义安装用）：AI_BRAIN_DSH_CLI=<cli.js 的绝对路径>
+    try {
+      const forced = String(process.env.AI_BRAIN_DSH_CLI || '').trim()
+      if (forced && existsSync(forced)) return forced
+    } catch { /* 忽略 */ }
     // ① npm / web profile：让 Node 解析器找 bin.js
     try {
       for (const spec of ['@deepseek-ai/dsh/lib/bin.js', '@deepseek-ai/dsh']) {
@@ -388,9 +400,28 @@ export function apply(ctx, config) {
 
   const browseToday = () => readState().browsed?.[vault.dayKey()] === true
   const siteBrowsedToday = (siteId) => readState().siteBrowsed?.[`${siteId}:${vault.dayKey()}`] === true
-  let browseChild = null   // 当前在跑的逛互联网子进程（到结束时间要杀）
+  let browseChild = null   // 当前在跑的逛互联网子进程（到点要杀）
+  let browseStartedAt = 0  // 本次逛的开始时间（epoch ms）
+  let browseDeadline = 0   // 本次逛的结束时间（epoch ms，0=没在逛）
 
   const hmNow = () => { const n = new Date(); return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` }
+  const hmOf = (ms) => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
+  // 到点就收尾：把 HH:mm 换成「今天这个点的 epoch」，已过点则算明天（定时窗口可能跨零点）
+  const todayAt = (hm) => {
+    const [h, m] = String(hm).split(':').map(Number)
+    const d = new Date(); d.setSeconds(0, 0); d.setHours(h, m, 0, 0)
+    if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1)
+    return d.getTime()
+  }
+  const stopBrowse = (reason) => {
+    if (!browseChild) return false
+    log(`停止逛互联网：${reason}`)
+    try { browseChild.kill() } catch { /* 忽略 */ }
+    browseChild = null
+    browseDeadline = 0
+    jobEnd('browse')
+    return true
+  }
 
   // 写 headless-overlay.yml：把某个网站的 MCP 挂进 headless 会话 + 打开 credentials（headless 默认禁）
   const ensureOverlay = (site) => {
@@ -468,11 +499,21 @@ export function apply(ctx, config) {
 
   const doBrowse = async (why = 'schedule', site = null) => {
     refreshCfg()
-    if (!cfg.browseEnabled) return { ok: false, error: '逛互联网没开' }
+    // 手动逛（点了按钮 / 让 agent 跑）不受「定时开关」限制——用户当场让逛就逛。
+    if (why !== 'manual' && !cfg.browseEnabled) return { ok: false, error: '逛互联网没开' }
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
+    if (browseChild) return { ok: false, error: '已经在逛了（要停就先点「停止」）' }
     const cli = findDshCli()
     if (!cli) { log('逛互联网没跑：找不到 dsh cli'); return { ok: false, error: '找不到 dsh cli' } }
+
+    // 这次逛到几点结束：
+    //  · 定时逛（schedule）：用「结束时间」browseEndTime 那个钟点（没设就按时长兜底）
+    //  · 手动逛：按「单次最长」browseMaxMinutes 算，从此刻起
+    const mins = Math.max(1, Math.min(180, Math.round(Number(cfg.browseMaxMinutes) || 20)))
+    const endsAt = (why !== 'manual' && cfg.browseEndTime) ? todayAt(cfg.browseEndTime) : Date.now() + mins * 60_000
     jobStart('browse')
+    browseStartedAt = Date.now()
+    browseDeadline = endsAt
 
     // 逛指定网站 vs 自由逛
     const siteDir = site ? site.id : '综合'
@@ -488,7 +529,7 @@ export function apply(ctx, config) {
       `统一放到你工作目录下的 3.探索/${siteDir}/ 子目录里（文件名要像“以后会怎么搜它”）。`,
       '有用的结论、事实、工具、踩坑都要记；写 3-5 篇就够，别灌水。',
       '逛 3-5 个相关主题就停，最后写一篇简短的总结（今天逛了什么、记了什么、没逛成什么）。',
-      cfg.browseEndTime ? `必须在 ${cfg.browseEndTime} 之前收尾停笔，不要恋战。` : '',
+      `现在时间 ${hmNow()}，你这次逛最晚到 ${hmOf(endsAt)} 就必须收尾停笔（到点会被强制掐断，来不及写的先写个草稿）。`,
     ].filter(Boolean).join('\n')
 
     // 逛指定网站时挂 overlay（把 MCP 挂进去）
@@ -497,7 +538,7 @@ export function apply(ctx, config) {
     if (overlay) args.push('--patch', overlay)
     args.push(prompt)
 
-    log(`逛互联网开跑（${why}，${site ? `站点=${site.name}` : '自由'}，mode=${cfg.browseMode}）`)
+    log(`逛互联网开跑（${why}，${site ? `站点=${site.name}` : '自由'}，mode=${cfg.browseMode}，最晚 ${hmOf(endsAt)}）`)
     // 用 process.execPath 直接跑 cli.js（shell:false），不经过 dsh.cmd / cmd.exe，
     // 避免 .cmd 路径带空格被截断。参考 dsh-bili-scroll 的 resolveDsh。
     const child = spawn(process.execPath, args, {
@@ -527,6 +568,8 @@ export function apply(ctx, config) {
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
       browseChild = null
+      browseDeadline = 0
+      browseStartedAt = 0
       jobEnd('browse')
       log(`逛互联网结束（code=${code}）`)
       // 把 headless 会话产出的笔记搬进知识库 3.探索/<站点>/（宿主不受沙箱限制，能写知识库）
@@ -552,22 +595,22 @@ export function apply(ctx, config) {
       if (site) bumpState({ siteBrowsed: { ...(readState().siteBrowsed || {}), [`${site.id}:${vault.dayKey()}`]: true } })
       else bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
     })
-    child.on('error', (e) => { jobEnd('browse'); log(`逛互联网起不来：${e?.message ?? e}`) })
-    return { ok: true, started: true }
+    child.on('error', (e) => { browseDeadline = 0; browseStartedAt = 0; jobEnd('browse'); log(`逛互联网起不来：${e?.message ?? e}`) })
+    return { ok: true, started: true, endsAt: browseDeadline, maxMinutes: mins }
   }
 
   const browseTick = () => {
     try {
       refreshCfg()
-      // 到结束时间：还有子进程在逛 → 强制杀（有始有终）
-      if (cfg.browseEndTime && hmNow() === cfg.browseEndTime && browseChild) {
-        log(`到结束时间 ${cfg.browseEndTime}，强制收尾`)
-        try { browseChild.kill() } catch { /* 忽略 */ }
-        browseChild = null
+      // 到点就杀（有始有终）：不用「== 某个钟点」——定时器踩空一分钟就永远杀不掉了
+      if (browseChild && browseDeadline && Date.now() >= browseDeadline) {
+        stopBrowse(`到结束时间 ${hmOf(browseDeadline)}，强制收尾`)
       }
+      // 定时起逛
       if (!cfg.browseEnabled || !cfg.browseTime) return
       if (hmNow() !== cfg.browseTime) return
       if (browseToday()) return
+      if (browseChild) return
       doBrowse('schedule').catch((e) => log(`逛互联网异常：${e?.stack ?? e}`))
     } catch (e) { log(`逛互联网定时器出错（已兜住）：${e?.stack ?? e}`) }
   }
@@ -813,8 +856,9 @@ export function apply(ctx, config) {
         vault: cfg.vaultPath || '',
         reviewEnabled: cfg.reviewEnabled, reviewTime: cfg.reviewTime,
         reviewedToday: reviewToday(), browseEnabled: cfg.browseEnabled, browseTime: cfg.browseTime,
-        browseEndTime: cfg.browseEndTime,
+        browseEndTime: cfg.browseEndTime, browseMaxMinutes: cfg.browseMaxMinutes,
         browseMode: cfg.browseMode, browsedToday: browseToday(), browsing: Boolean(browseChild),
+        browseStartedAt, browseDeadline,
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
         jobs: { ...jobs },
         config: { ...cfg }, // 完整配置（apiKey 也带，本机同源 fetch，设置页要回显）
@@ -839,6 +883,11 @@ export function apply(ctx, config) {
     }
     if (sub === '/review' && req.method === 'POST') return sendJson(res, 200, await doReview('manual'))
     if (sub === '/browse' && req.method === 'POST') return sendJson(res, 200, await doBrowse('manual'))
+    if (sub === '/browse/stop' && req.method === 'POST') {
+      const stopped = stopBrowse('你在设置页点了停止')
+      if (!stopped) log('点了停止，但当前没有在逛')
+      return sendJson(res, 200, { ok: true, stopped })
+    }
     // ── B站 / 网站源 ──
     if (sub === '/site/status' && req.method === 'GET') {
       refreshCfg()
