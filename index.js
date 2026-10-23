@@ -30,7 +30,7 @@ import * as bili from './lib/bili.mjs'
 import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
 import * as tidy from './lib/tidy.mjs'
-import { GRACE_MIN, due } from './lib/schedule.mjs'
+import { GRACE_MIN, due, dayKey, stamp, hmOf, humanNow } from './lib/schedule.mjs'
 
 export const name = 'ai-brain'
 export const inject = ['tools', 'settings', 'webServer']
@@ -101,7 +101,7 @@ export function apply(ctx, config) {
 
   const logFile = join(stateDir, 'brain.log')
   const log = (msg) => {
-    const line = `${new Date().toISOString()}  ${msg}`
+    const line = `${stamp()}  ${msg}`
     try { appendFileSync(logFile, line + '\n', 'utf8') } catch { /* 写不进不致命 */ }
     try { ctx.logger?.info?.(`[ai-brain] ${msg}`) } catch { /* 没有就算了 */ }
   }
@@ -358,7 +358,7 @@ export function apply(ctx, config) {
     })
     jobEnd('review')
     if (r.ok) {
-      bumpState({ reviewed: { ...(readState().reviewed || {}), [today]: true }, lastReviewAt: new Date().toISOString() })
+      bumpState({ reviewed: { ...(readState().reviewed || {}), [today]: true }, lastReviewAt: stamp() })
       log(`复盘完成：写入 ${r.notes.length} 篇${r.archived ? '，收件箱已归档' : ''}`)
       // 复盘后顺手整理目录（默认关，见 Config.tidyOnReview）
       if (cfg.tidyOnReview && cfg.vaultPath) {
@@ -448,8 +448,8 @@ export function apply(ctx, config) {
   let browseStartedAt = 0  // 本次逛的开始时间（epoch ms）
   let browseDeadline = 0   // 本次逛的结束时间（epoch ms，0=没在逛）
 
-  const hmNow = () => { const n = new Date(); return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` }
-  const hmOf = (ms) => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
+  // 时间口径统一在 lib/schedule.mjs（本地时间，不用 toISOString）；hmNow = 此刻的 HH:mm
+  const hmNow = () => hmOf(Date.now())
   // 到点就收尾：把 HH:mm 换成「今天这个点的 epoch」，已过点则算明天（定时窗口可能跨零点）
   const todayAt = (hm) => {
     const [h, m] = String(hm).split(':').map(Number)
@@ -575,7 +575,9 @@ export function apply(ctx, config) {
       `统一放到你工作目录下的 7.探索/${siteDir}/ 子目录里（文件名要像“以后会怎么搜它”）。`,
       '有用的结论、事实、工具、踩坑都要记；写 3-5 篇就够，别灌水。',
       '逛 3-5 个相关主题就停，最后写一篇简短的总结（今天逛了什么、记了什么、没逛成什么）。',
-      `现在时间 ${hmNow()}，你这次逛最晚到 ${hmOf(endsAt)} 就必须收尾停笔（到点会被强制掐断，来不及写的先写个草稿）。`,
+      `现在是 ${humanNow()}（本机本地时间，就是你唯一可信的“现在”）。`,
+      `⚠️ 你的环境里读不到系统时间（pwsh/date 可能起不来）。所以文件名和正文里凡是写日期，**一律用 ${dayKey()} 这一天**，不许自己推测日期。`,
+      `你这次逛最晚到 ${hmOf(endsAt)} 就必须收尾停笔（到点会被强制掐断，来不及写的先写个草稿）。`,
     ].filter(Boolean).join('\n')
 
     // 逛指定网站时挂 overlay（把 MCP 挂进去）
