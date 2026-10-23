@@ -30,6 +30,7 @@ import * as bili from './lib/bili.mjs'
 import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
 import * as tidy from './lib/tidy.mjs'
+import { GRACE_MIN, due } from './lib/schedule.mjs'
 
 export const name = 'ai-brain'
 export const inject = ['tools', 'settings', 'webServer']
@@ -392,14 +393,12 @@ export function apply(ctx, config) {
     return t
   }
 
+  // ── 「到点了吗」的判断（见 lib/schedule.mjs 里的两条踩坑说明）──
   const tick = () => {
     try {
       refreshCfg()
       if (!cfg.reviewEnabled) return
-      const now = new Date()
-      const hm = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`
-      if (hm !== cfg.reviewTime) return
-      if (reviewToday()) return
+      if (!due(cfg.reviewTime, reviewToday())) return
       doReview('schedule').catch((e) => log(`复盘异常：${e?.stack ?? e}`))
     } catch (e) {
       log(`定时器这一跳出错（已兜住）：${e?.stack ?? e}`)
@@ -555,7 +554,9 @@ export function apply(ctx, config) {
     //  · 定时逛（schedule）：用「结束时间」browseEndTime 那个钟点（没设就按时长兜底）
     //  · 手动逛：按「单次最长」browseMaxMinutes 算，从此刻起
     const mins = Math.max(1, Math.min(180, Math.round(Number(cfg.browseMaxMinutes) || 20)))
-    const endsAt = (why !== 'manual' && cfg.browseEndTime) ? todayAt(cfg.browseEndTime) : Date.now() + mins * 60_000
+    const endsAt = (why !== 'manual' && cfg.browseEndTime)
+      ? Math.min(todayAt(cfg.browseEndTime), Date.now() + mins * 60_000)   // 两个都是上限，谁先到按谁
+      : Date.now() + mins * 60_000
     jobStart('browse')
     browseStartedAt = Date.now()
     browseDeadline = endsAt
@@ -571,7 +572,7 @@ export function apply(ctx, config) {
       `浏览偏好：${mode}`,
       sitePrompt,
       '要求：不要复制全文，消化后用自己的话记结论；每篇笔记写成 Markdown 文件，',
-      `统一放到你工作目录下的 3.探索/${siteDir}/ 子目录里（文件名要像“以后会怎么搜它”）。`,
+      `统一放到你工作目录下的 7.探索/${siteDir}/ 子目录里（文件名要像“以后会怎么搜它”）。`,
       '有用的结论、事实、工具、踩坑都要记；写 3-5 篇就够，别灌水。',
       '逛 3-5 个相关主题就停，最后写一篇简短的总结（今天逛了什么、记了什么、没逛成什么）。',
       `现在时间 ${hmNow()}，你这次逛最晚到 ${hmOf(endsAt)} 就必须收尾停笔（到点会被强制掐断，来不及写的先写个草稿）。`,
@@ -593,10 +594,10 @@ export function apply(ctx, config) {
       env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
     })
     browseChild = child
-    // 逛开始前先记下 stateDir/3.探索/<站点> 里已有的文件名，exit 时把新增的搬进知识库
+    // 逛开始前先记下 stateDir/7.探索/<站点> 里已有的文件名，exit 时把新增的搬进知识库
     const preExisting = new Set()
     try {
-      const bd = join(stateDir, '3.探索', siteDir)
+      const bd = join(stateDir, '7.探索', siteDir)
       if (existsSync(bd)) for (const f of readdirSync(bd)) preExisting.add(f)
     } catch { /* 读不到就算了 */ }
     // cmd.exe 吐的中文报错是 GBK，按 UTF-8 写日志会变方块；先 UTF-8 解，出替换符就回退 GBK
@@ -617,11 +618,11 @@ export function apply(ctx, config) {
       browseStartedAt = 0
       jobEnd('browse')
       log(`逛互联网结束（code=${code}）`)
-      // 把 headless 会话产出的笔记搬进知识库 3.探索/<站点>/（宿主不受沙箱限制，能写知识库）
+      // 把 headless 会话产出的笔记搬进知识库 7.探索/<站点>/（宿主不受沙箱限制，能写知识库）
       let moved = 0
       try {
-        const srcDir = join(stateDir, '3.探索', siteDir)
-        const dstDir = join(cfg.vaultPath, '3.探索', siteDir)
+        const srcDir = join(stateDir, '7.探索', siteDir)
+        const dstDir = join(cfg.vaultPath, '7.探索', siteDir)
         if (existsSync(srcDir)) {
           mkdirSync(dstDir, { recursive: true })
           for (const f of readdirSync(srcDir)) {
@@ -630,12 +631,12 @@ export function apply(ctx, config) {
             try {
               renameSync(join(srcDir, f), join(dstDir, f))
               moved++
-              log(`逛互联网笔记入知识库：3.探索/${siteDir}/${f}`)
+              log(`逛互联网笔记入知识库：7.探索/${siteDir}/${f}`)
             } catch (e) { log(`搬笔记 ${f} 失败：${e?.message ?? e}`) }
           }
         }
       } catch (e) { log(`搬笔记时出错：${e?.message ?? e}`) }
-      if (moved) log(`逛互联网共 ${moved} 篇笔记写进知识库 3.探索/${siteDir}/`)
+      if (moved) log(`逛互联网共 ${moved} 篇笔记写进知识库 7.探索/${siteDir}/`)
       else log('逛互联网结束：本次没有新增笔记落盘（可能没逛成、或笔记写在了别处）')
       if (site) bumpState({ siteBrowsed: { ...(readState().siteBrowsed || {}), [`${site.id}:${vault.dayKey()}`]: true } })
       else bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
@@ -653,8 +654,7 @@ export function apply(ctx, config) {
       }
       // 定时起逛
       if (!cfg.browseEnabled || !cfg.browseTime) return
-      if (hmNow() !== cfg.browseTime) return
-      if (browseToday()) return
+      if (!due(cfg.browseTime, browseToday())) return
       if (browseChild) return
       doBrowse('schedule').catch((e) => log(`逛互联网异常：${e?.stack ?? e}`))
     } catch (e) { log(`逛互联网定时器出错（已兜住）：${e?.stack ?? e}`) }
@@ -863,7 +863,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bili_run',
-    description: '立刻起一个 headless 会话去逛 B站（不等定时窗口），逛完把笔记写进知识库 3.探索/bili/。适合"我现在就想看它逛一圈"的场合。需先装环境 + 扫码登录。',
+    description: '立刻起一个 headless 会话去逛 B站（不等定时窗口），逛完把笔记写进知识库 7.探索/bili/。适合"我现在就想看它逛一圈"的场合。需先装环境 + 扫码登录。',
     parameters: {},
     async execute() {
       refreshCfg()

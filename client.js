@@ -338,7 +338,7 @@ window.__ModuleLoader__.load({
         setBusy('bilibrowse'); say('')
         try {
           const r = await jpost('/site/browse', { site: 'bili' })
-          if (r && r.ok) say(`已经在后台逛 B站 了${r.endsAt ? '，' + hmOf(r.endsAt) + ' 自动收尾' : ''}，笔记会落 3.探索/bili/，日志见「概览」页`, 'good')
+          if (r && r.ok) say(`已经在后台逛 B站 了${r.endsAt ? '，' + hmOf(r.endsAt) + ' 自动收尾' : ''}，笔记会落 7.探索/bili/，日志见「概览」页`, 'good')
           else say('没起来：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -462,8 +462,8 @@ window.__ModuleLoader__.load({
           onChange: (v) => { jpost('/config', { browseEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
         h(Field, { label: '逛的时间', note: 'HH:mm，到点自动开始（每天一次），留空 = 只手动逛', value: draft?.browseTime, onChange: (v) => set('browseTime', v), placeholder: '21:00' }),
-        h(Field, { label: '结束时间（定时逛用）', note: 'HH:mm，到点强制收尾（没逛完也停）；留空 = 逛完自己停', value: draft?.browseEndTime, onChange: (v) => set('browseEndTime', v), placeholder: '21:30' }),
-        h(Field, { label: '单次最长（分钟）', note: '手动点「现在逛 / 逛 B站」时按这个算结束时间，到点自动收尾（1–180）', value: draft?.browseMaxMinutes, onChange: (v) => set('browseMaxMinutes', v), placeholder: '20' }),
+        h(Field, { label: '结束时间（定时逛用）', note: 'HH:mm，到点强制收尾（没逛完也停）；留空 = 逛完自己停。和「单次最长」谁先到按谁', value: draft?.browseEndTime, onChange: (v) => set('browseEndTime', v), placeholder: '21:30' }),
+        h(Field, { label: '单次最长（分钟）', note: '手动点「现在逛 / 逛 B站」按这个算结束时间；定时逛时它也是上限（1–180）', value: draft?.browseMaxMinutes, onChange: (v) => set('browseMaxMinutes', v), placeholder: '20' }),
         h('div', { 'data-ab-row': '' },
           h('div', { 'data-ab-grow': '' },
             h('div', { 'data-ab-label': '' }, '浏览偏好'),
