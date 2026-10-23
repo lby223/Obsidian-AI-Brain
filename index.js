@@ -108,8 +108,8 @@ export function apply(ctx, config) {
     if ('model' in o) o.model = String(o.model || '').trim()
     if ('reviewPrompt' in o) o.reviewPrompt = String(o.reviewPrompt || '').slice(0, 20000)
     if ('browseEnabled' in o) o.browseEnabled = Boolean(o.browseEnabled)
-    if ('browseTime' in o) o.browseTime = /^\d{1,2}:\d{2}$/.test(String(o.browseTime || '')) ? String(o.browseTime) : ''
-    if ('browseEndTime' in o) o.browseEndTime = /^\d{1,2}:\d{2}$/.test(String(o.browseEndTime || '')) ? String(o.browseEndTime) : ''
+    if ('browseTime' in o) o.browseTime = normalizeHm(o.browseTime)
+    if ('browseEndTime' in o) o.browseEndTime = normalizeHm(o.browseEndTime)
     if ('browseMode' in o) o.browseMode = ['off', 'kb'].includes(String(o.browseMode)) ? String(o.browseMode) : 'off'
     return o
   }
@@ -319,7 +319,15 @@ export function apply(ctx, config) {
   const browseToday = () => readState().browsed?.[vault.dayKey()] === true
   let browseChild = null   // 当前在跑的逛互联网子进程（到结束时间要杀）
 
-  const hmNow = () => { const n = new Date(); return `${n.getHours()}:${String(n.getMinutes()).padStart(2, '0')}` }
+  const hmNow = () => { const n = new Date(); return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` }
+  // 时间统一存成 HH:mm（补零）：「2:00」「02:00」都收，避免格式不一致导致对时错配
+  const normalizeHm = (v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim())
+    if (!m) return ''
+    const h = Number(m[1]), min = Number(m[2])
+    if (h > 23 || min > 59) return ''
+    return `${String(h).padStart(2, '0')}:${m[2]}`
+  }
 
   const doBrowse = async (why = 'schedule') => {
     refreshCfg()
