@@ -380,7 +380,7 @@ window.__ModuleLoader__.load({
       }
 
       const onTidyApply = async () => {
-        if (!window.confirm('整理只做两件事：把确定归错位的笔记搬到该去的目录、把「同名嵌套」和「索引与目录同名」修好。\n\n它绝不删文件，也绝不碰 3.自我/ 和 社交人格/。清单会写进 9.归档/整理记录/，想撤回照着搬回来就行。\n\n确定现在整理吗？')) return
+        if (!window.confirm('整理会做这几件事：\n\n· 把确定归错位的笔记搬到该去的目录\n· 修好「同名嵌套」「索引与目录同名」\n· 删掉空文件、以及与另一篇逐字节完全相同的重复件\n\n有内容的笔记绝不会被删。改动清单写进 9.归档/整理记录/，想撤回想查都照着来。\n\n确定现在整理吗？')) return
         setBusy('tidy'); say('')
         try {
           const r = await jpost('/tidy/apply', {})
@@ -585,7 +585,7 @@ window.__ModuleLoader__.load({
         h(Field, { label: 'model', note: '如 deepseek-chat', value: draft?.model, onChange: (v) => set('model', v), placeholder: 'deepseek-chat' }),
 
         h('div', { 'data-ab-h': '' }, '知识库体检 / 整理'),
-        h('div', { 'data-ab-note': '' }, '体检是只读的：编号撞车、同名嵌套目录、空文件、日期写在未来、笔记散在目录根下——这些规则都能判准，不用模型。整理只按固定规则表搬动/改名，绝不删文件，也绝不碰 3.自我/ 和 社交人格/；拿不准的只报告不动手。'),
+        h('div', { 'data-ab-note': '' }, '体检是只读的：编号撞车、同名嵌套目录、空文件、日期写在未来、笔记散在目录根下、重复笔记——这些规则都能判准，不用模型。整理会按规则表搬动/改名、合并重复，并删掉空文件和逐字节重复的笔记；有内容的笔记绝不会被删，每处改动都记进 9.归档/整理记录。拿不准的只报告不动手。'),
         h('div', { 'data-ab-row': '' },
           h('button', { 'data-ab-btn': '', disabled: busy === 'scan', onClick: onTidyScan }, busy === 'scan' ? '体检中…' : '体检一下'),
           h('button', { 'data-ab-btn': '', disabled: busy === 'tidy', onClick: onTidyApply }, busy === 'tidy' ? '整理中…' : '整理目录')),

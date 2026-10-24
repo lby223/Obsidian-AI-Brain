@@ -332,7 +332,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'brain_tidy',
-    description: '知识库体检 / 整理。action=scan（只读，报编号撞车、同名嵌套目录、空文件、未来日期、散落笔记）或 action=tidy（按固定规则表移动/改名，绝不删文件，绝不碰 3.自我 与 社交人格）。不确定怎么归类的东西它只报告不动手。',
+    description: '整理自己这个知识库（这是 AI 的记忆库，可以自己收拾）。action=scan（只读体检：编号撞车、同名嵌套目录、空文件、未来日期、散落笔记、重复笔记、索引跟不上）或 action=tidy（执行：按规则表移动/改名 + 合并重复 + 删掉空文件和逐字节重复的笔记）。有内容的笔记绝不会被删；每处改动都写进 9.归档/整理记录，可查可撤。',
     parameters: {
       action: { type: 'string', description: 'scan（只体检，默认）或 tidy（体检并把能确定的搬对位置）' },
     },
@@ -390,23 +390,28 @@ export function apply(ctx, config) {
   }
 
   // ── 功能 E：知识库体检 + 受限整理（规则驱动，不用模型） ──
-  // 体检：只读，报「编号撞车 / 同名嵌套 / 空文件 / 未来日期 / 索引与目录同名 / 散落笔记」
-  // 整理：只做 move / rename，绝不删除，绝不碰 3.自我 与 社交人格
+  // 体检：只读，报「编号撞车 / 同名嵌套 / 空文件 / 未来日期 / 索引与目录同名 / 散落笔记 / 重复笔记」
+  // 整理：移动 + 改名 + 合并重复 + 删掉空文件和逐字节重复的笔记
+  //   用户定的原则（2026-10-24 原话）：「让ai自己整理即可，这是他的大脑。」
+  //   所以 3.自我 / 社交人格 不设禁地；但**有内容的笔记绝不静默删除**，每一处删除都写进清单。
   const doScan = () => {
     refreshCfg()
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
     const s = tidy.scan(cfg.vaultPath)
-    if (s.ok) log(`体检完成：${s.summary.total} 条（${s.summary.errors} 个硬错），待整理 ${tidy.plan(cfg.vaultPath).actions.length} 项`)
+    if (s.ok) {
+      const p = tidy.plan(cfg.vaultPath)
+      log(`体检完成：${s.summary.total} 条（${s.summary.errors} 个硬错），待整理 ${p.actions.length + (p.dels?.length || 0)} 项`)
+    }
     return s
   }
 
   const doTidy = () => {
     refreshCfg()
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
-    log('整理开始（只移动/改名/刷新索引，不删文件）')
+    log('整理开始（移动/改名/合并重复/删空文件与重复件，有内容的笔记不删）')
     const t = tidy.apply(cfg.vaultPath, { log })
     const ix = t.index && t.index.ok ? `，探索索引${t.index.changed ? '已刷新' : '已是最新'}（${t.index.total} 篇）` : ''
-    log(`整理完成：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${ix}`)
+    log(`整理完成：移动 ${t.moved.length} 项，删除 ${t.deleted.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${ix}`)
     return t
   }
 
