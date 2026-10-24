@@ -29,3 +29,8 @@
         biliKeywords: ""
         customSites: ""
         tidyOnReview: false
+        purgeOnReview: true
+        recycleKeepDays: 90
+        tailCapture: true
+        tailEveryMinutes: 15
+        catchUp: true

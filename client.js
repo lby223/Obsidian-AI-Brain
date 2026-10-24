@@ -319,6 +319,7 @@ window.__ModuleLoader__.load({
             siteMaxMinutes: cfg.siteMaxMinutes == null ? 20 : cfg.siteMaxMinutes,
             biliMentionName: cfg.biliMentionName || '',
             customSites: cfg.customSites || '',
+            tailEveryMinutes: cfg.tailEveryMinutes == null ? 15 : cfg.tailEveryMinutes,
           })
         }
       }, [cfg, draft])
@@ -330,7 +331,7 @@ window.__ModuleLoader__.load({
         setBusy('save')
         try {
           const p = {}
-          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseMaxMinutes', 'siteTime', 'siteMaxMinutes', 'biliMentionName', 'customSites']) {
+          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseMaxMinutes', 'siteTime', 'siteMaxMinutes', 'tailEveryMinutes', 'biliMentionName', 'customSites']) {
             if (draft && k in draft) p[k] = draft[k]
           }
           // apiKey 留空 = 不改原来的（别把空串或脱敏占位写回去，把真 key 覆盖掉）
@@ -366,6 +367,18 @@ window.__ModuleLoader__.load({
           const r = await jpost('/browse/stop', {})
           if (r && r.ok) say(r.stopped ? '已停止逛互联网，本次产出已经收尾入库' : '当前没有在逛', r.stopped ? 'good' : '')
           else say('停止没成：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onTail = async (force) => {
+        if (force && !window.confirm('重抓今天会把今天的对话再抽一遍，可能出现重复内容。要继续吗？')) return
+        setBusy('tail'); say('正在读会话日志…')
+        try {
+          const r = await jpost('/tail', { force: force === true })
+          if (r && r.ok) {
+            say(r.added ? `抓完：${r.sessions} 个会话、${r.added} 条对话补进今天的收件箱` : '抓完了：没有新的对话（都记过了）', r.added ? 'good' : '')
+            jget('/status').then((s) => s && s.ok && setSt(s)).catch(() => {})
+          } else say('抓取没成：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -650,6 +663,33 @@ window.__ModuleLoader__.load({
           note: '开：每次复盘完顺手按规则表整理一遍目录（动的只有确定归错位的，会写清单）。默认关',
           on: !!cfg.tidyOnReview,
           onChange: (v) => { jpost('/config', { tidyOnReview: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+        }),
+
+        // ── 会话尾巴：不依赖模型主动记 ──
+        h('div', { 'data-ab-h': '' }, '会话尾巴（别丢）'),
+        h('div', { 'data-ab-note': '' }, '对话要不要记，以前全看模型某一步有没有主动调 brain_capture——它不调，这段话就没了。打开这个，插件会定时去 DSH 会话日志里把「你说的原话 + 我当时的回答」抢救进当天收件箱，等复盘时再判断值不值得留。只抓人说的话（会话日志里八成是系统注入，会被过滤）。'),
+        h(ToggleRow, {
+          label: '自动抓会话尾巴',
+          note: '开：每 N 分钟把今天新说过的对话补进 0.收件箱/当天.md',
+          on: !!cfg.tailCapture,
+          onChange: (v) => { jpost('/config', { tailCapture: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+        }),
+        h(Field, {
+          label: '隔多久抓一次（分钟）',
+          note: '5–120，默认 15。改完点下面的「保存」',
+          type: 'number',
+          value: draft.tailEveryMinutes,
+          onChange: (v) => setDraft((d) => ({ ...d, tailEveryMinutes: v })),
+        }),
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', disabled: busy === 'tail', onClick: () => onTail(false) }, busy === 'tail' ? '抓取中…' : '现在抓一次'),
+          h('button', { 'data-ab-btn': '', disabled: busy === 'tail', onClick: () => onTail(true) }, '重抓今天（可能重复）'),
+          h('div', { 'data-ab-note': '' }, st && st.tailSessions ? `已记 ${st.tailSessions} 个会话的水位` : '还没抓过')),
+        h(ToggleRow, {
+          label: '启动时补跑漏掉的活',
+          note: '开：DSH 一启动就检查「今天该做的复盘/逛网做了没」，没做就补。定时器活在进程内存里，DSH 一关就没了——白天关机不会因此漏掉一整天',
+          on: !!cfg.catchUp,
+          onChange: (v) => { jpost('/config', { catchUp: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
 
         h('div', { 'data-ab-row': '' },

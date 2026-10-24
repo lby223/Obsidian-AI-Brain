@@ -17,7 +17,7 @@ const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, chmodSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, chmodSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -31,6 +31,7 @@ import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
 import * as tidy from './lib/tidy.mjs'
 import * as recycle from './lib/recycle.mjs'
+import * as tail from './lib/sessiontail.mjs'
 import { GRACE_MIN, due, dayKey, stamp, hmOf, humanNow } from './lib/schedule.mjs'
 import { mask, sameOrigin, safeYaml, safeYamlKey, filterUserEnv } from './lib/guard.mjs'
 
@@ -76,6 +77,12 @@ export const Config = !z ? undefined : z.object({
   tidyOnReview: z.boolean().default(false).extra('volatile', true),
   purgeOnReview: z.boolean().default(true).extra('volatile', true),
   recycleKeepDays: z.number().default(90).extra('volatile', true),
+  // ── 「别丢」与「补跑」──
+  // tailCapture：定时从会话日志里把你我说过的话抢救进收件箱（不依赖模型主动记）
+  tailCapture: z.boolean().default(true).extra('volatile', true),
+  tailEveryMinutes: z.number().default(15).extra('volatile', true),
+  // catchUp：启动时补跑「今天该做但没做」的复盘/逛网（定时器活在进程内存里，DSH 一关就没了）
+  catchUp: z.boolean().default(true).extra('volatile', true),
 })
 
 const DEFAULTS = {
@@ -91,6 +98,9 @@ const DEFAULTS = {
   tidyOnReview: false,
   purgeOnReview: true,
   recycleKeepDays: 90,
+  tailCapture: true,
+  tailEveryMinutes: 15,
+  catchUp: true,
 }
 
 export function apply(ctx, config) {
@@ -100,6 +110,11 @@ export function apply(ctx, config) {
     if (myVer) return myVer
     try { myVer = String(JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')).version || '') } catch { myVer = '' }
     return myVer
+  }
+  // 入口文件的修改时间 = 这份代码是什么时候的。以前日志一律写 0.1.0，
+  // 重启后根本分不清「跑的是新代码还是旧代码」。
+  const myBuild = () => {
+    try { return stamp(new Date(statSync(fileURLToPath(import.meta.url)).mtimeMs)) } catch { return '未知' }
   }
 
   // ── 家目录 ──
@@ -194,6 +209,9 @@ export function apply(ctx, config) {
     if ('tidyOnReview' in o) o.tidyOnReview = Boolean(o.tidyOnReview)
     if ('purgeOnReview' in o) o.purgeOnReview = Boolean(o.purgeOnReview)
     if ('recycleKeepDays' in o) { const n = Number(o.recycleKeepDays); o.recycleKeepDays = Number.isFinite(n) ? Math.max(7, Math.min(3650, Math.round(n))) : 90 }
+    if ('tailCapture' in o) o.tailCapture = Boolean(o.tailCapture)
+    if ('tailEveryMinutes' in o) { const n = Number(o.tailEveryMinutes); o.tailEveryMinutes = Number.isFinite(n) ? Math.max(5, Math.min(120, Math.round(n))) : 15 }
+    if ('catchUp' in o) o.catchUp = Boolean(o.catchUp)
     return o
   }
 
@@ -334,6 +352,23 @@ export function apply(ctx, config) {
       if (!rel) return { ok: false, error: 'path 不能为空' }
       const r = vault.writeNote(v, rel, String(args?.content || ''))
       return r
+    },
+  })
+
+  tool({
+    name: 'brain_session_tail',
+    description: '把「今天你和我说过的话」从 DSH 会话日志里抢救进 0.收件箱/当天.md（会话尾巴）。插件会自己定时做，这个工具用来立刻做一次。只抽人说的话（会话日志里 80% 是系统注入，会被过滤）+ 我当时的文字回答；已经记过的不会重复记（按会话记水位数）。注意：正在进行的这一段对话，磁盘上只有上次写入的部分，最后几分钟读不到。',
+    parameters: {
+      force: { type: 'boolean', description: '忽略水位，把今天的对话整段再抽一遍（可能重复）' },
+    },
+    async execute(args) {
+      refreshCfg()
+      if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
+      if (args?.force === true) {
+        const st = readState()
+        writeJson(stateFile, { ...st, sessionTail: {} })
+      }
+      return doTail('tool')
     },
   })
 
@@ -485,6 +520,51 @@ export function apply(ctx, config) {
     log(`整理完成：移动 ${t.moved.length} 项，删除 ${t.deleted.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${ix}`)
     return t
   }
+
+  // ── 功能 A：会话尾巴 ──
+  // 为什么需要：插件本身读不到会话内容。以前「对话要不要记」全看模型某一步是否
+  // 主动调 brain_capture——它不调，这段对话就消失。这里定时去会话日志里把
+  // 「你说的原话 + 我当时的回答」抢救进收件箱，判断留给复盘时的模型。
+  // 只负责「别丢」，不负责「值不值得」——值不值得是 03:00 复盘那一步的事。
+  const sessionsRoot = join(homedir(), '.dsh', 'sessions')
+  const doTail = (why = 'timer') => {
+    refreshCfg()
+    if (!cfg.tailCapture) return { ok: false, error: '会话尾巴没开' }
+    if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
+    try {
+      const r = tail.captureSessionTail({
+        vaultPath: cfg.vaultPath,
+        sessionsRoot,
+        state: readState(),
+        saveState: (s) => writeJson(stateFile, s),
+        log,
+        maxUserPerSession: 25,
+        maxSessions: 6,
+      })
+      if (r.ok && r.added) log(`会话尾巴（${why}）：补进 ${r.added} 条对话`)
+      return r
+    } catch (e) {
+      log(`会话尾巴出错（已兜住）：${e?.stack ?? e}`)
+      return { ok: false, error: String(e?.message ?? e) }
+    }
+  }
+
+  const tailTick = () => {
+    try { doTail('timer') } catch (e) { log(`会话尾巴定时器出错（已兜住）：${e?.stack ?? e}`) }
+  }
+  try {
+    // 间隔可变（配置里能改），所以用 setTimeout 自续期，不用 setInterval
+    let tailTimer = null
+    const tailLoop = () => {
+      tailTick()
+      const mins = Math.max(5, Math.min(120, Math.round(Number(cfg.tailEveryMinutes) || 15)))
+      tailTimer = setTimeout(tailLoop, mins * 60_000)
+      tailTimer.unref?.()
+    }
+    tailTimer = setTimeout(tailLoop, 90_000)   // 挂载后 90 秒先抓一次（避开启动高峰）
+    tailTimer.unref?.()
+    ctx.effect(() => () => { try { clearTimeout(tailTimer) } catch { /* 忽略 */ } }, 'ai-brain: 会话尾巴定时器')
+  } catch (e) { log(`会话尾巴定时器没起来：${e?.message ?? e}`) }
 
   // ── 「到点了吗」的判断（见 lib/schedule.mjs 里的两条踩坑说明）──
   const tick = () => {
@@ -1078,6 +1158,9 @@ export function apply(ctx, config) {
         browseMode: cfg.browseMode, browsedToday: browseToday(), browsing: Boolean(browseChild),
         browseStartedAt, browseDeadline, siteQueued: siteQueue.length,
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
+        tailCapture: cfg.tailCapture, tailEveryMinutes: cfg.tailEveryMinutes,
+        tailSessions: Object.keys(readState().sessionTail || {}).length,
+        catchUp: cfg.catchUp,
         jobs: { ...jobs },
         // 完整配置，但 apiKey 之类的**不回明文**（设置页只需要知道"配了没有"）
         config: mask({ ...cfg }),
@@ -1095,6 +1178,14 @@ export function apply(ctx, config) {
       // 日志里也不能留明文 key（原来这行把整份配置含 apiKey 都写进了 brain.log，而 /log 又会把它吐回前端）
       log(`设置已更新：${JSON.stringify(mask(clean))}`)
       return sendJson(res, 200, { ok: true, config: mask({ ...cfg }) })
+    }
+    if (sub === '/tail' && req.method === 'POST') {
+      const body = await readBody(req)
+      if (body?.force === true) {
+        const st = readState()
+        writeJson(stateFile, { ...st, sessionTail: {} })
+      }
+      return sendJson(res, 200, doTail('panel'))
     }
     if (sub === '/log' && req.method === 'GET') {
       let text = ''
@@ -1210,5 +1301,52 @@ export function apply(ctx, config) {
     }), 'ai-brain: HTTP 路由')
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
-  log(`已挂载（版本 ${myVersion()}，库=${cfg.vaultPath || '未配置'}，复盘=${cfg.reviewEnabled ? cfg.reviewTime : '关'}）`)
+  // ── 功能 B：启动补跑 ──
+  // 定时器活在进程内存里，DSH 一关就没了。以前只有「机器整夜开着 DSH」时 03:00
+  // 的复盘才会跑；白天关机就漏掉一整天。这里在挂载后检查「今天该做但没做」的活，
+  // 没做就补。宽限逻辑照旧用 schedule.due()（到点 + 30 分钟内才算），所以补跑
+  // 不会在半夜三点开机时突然把昨天的活全干一遍。
+  const catchUp = () => {
+    try {
+      refreshCfg()
+      if (!cfg.catchUp) return
+      if (!cfg.vaultPath) return
+      const today = vault.dayKey()
+      const st = readState()
+      const reasons = []
+      if (cfg.reviewEnabled && !cfg.apiBaseUrl && !cfg.apiKey) {
+        // 模型没配就不谈补跑，静默
+      } else if (cfg.reviewEnabled && !reviewToday() && due(cfg.reviewTime, reviewToday())) {
+        reasons.push(`复盘 ${cfg.reviewTime} 到点没做`)
+      }
+      if (cfg.browseEnabled && cfg.browseTime && st.browsed?.[today] !== true && due(cfg.browseTime, false)) {
+        reasons.push(`逛互联网 ${cfg.browseTime} 到点没做`)
+      }
+      if (!reasons.length) {
+        log(`启动检查：今天没有待补的活（复盘=${reviewToday() ? '已做' : '未到点'}）`)
+        return
+      }
+      log(`启动补跑：${reasons.join('；')}`)
+      // 串行补：先复盘（它要读收件箱），再逛网（它会往库里写）
+      ;(async () => {
+        try {
+          if (reasons.some((r) => r.startsWith('复盘'))) await doReview('catchup')
+        } catch (e) { log(`补跑复盘出错（已兜住）：${e?.stack ?? e}`) }
+        try {
+          if (reasons.some((r) => r.startsWith('逛互联网'))) await doBrowse('schedule')
+        } catch (e) { log(`补跑逛互联网出错（已兜住）：${e?.stack ?? e}`) }
+      })()
+    } catch (e) {
+      log(`启动检查出错（已兜住）：${e?.stack ?? e}`)
+    }
+  }
+  // 挂载 20 秒后再检查：让宿主的 webServer / 设置都就位，别在启动高峰抢资源
+  try {
+    const cu = setTimeout(catchUp, 20_000)
+    cu.unref?.()
+    ctx.effect(() => () => { try { clearTimeout(cu) } catch { /* 忽略 */ } }, 'ai-brain: 启动补跑')
+  } catch (e) { log(`启动补跑没排上：${e?.message ?? e}`) }
+
+  // ── 版本与构建时间（日志里直接看出跑的是哪一版；以前一律 0.1.0，分不清新旧）──
+  log(`已挂载（版本 ${myVersion()} · 代码 ${myBuild()}，库=${cfg.vaultPath || '未配置'}，复盘=${cfg.reviewEnabled ? cfg.reviewTime : '关'}，会话尾巴=${cfg.tailCapture ? `${cfg.tailEveryMinutes} 分钟` : '关'}，补跑=${cfg.catchUp ? '开' : '关'}）`)
 }
