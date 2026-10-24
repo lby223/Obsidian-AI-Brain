@@ -237,6 +237,9 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [log, setLog] = React.useState('')   // 默认展开（用户 m02314 要日志默认打开），'' = 还没读到
+      // 日志是「越往下越新」，所以要钉在底部——否则默认看到的是最老的那几行，得自己往下拖
+      const logRef = React.useRef(null)
+      const [logStick, setLogStick] = React.useState(true)   // 用户往回翻时先别抢他的滚动位置
       // 输入框绑本地草稿，别直接绑 cfg（页面轮询会冲掉正在打的字）
       const [draft, setDraft] = React.useState(null)  // null = 还没从 cfg 初始化
       // B站 源状态
@@ -288,6 +291,13 @@ window.__ModuleLoader__.load({
         })()
         return () => { alive = false }
       }, [])
+
+      // 日志一更新就滚到底：新的一行永远在最下面
+      React.useEffect(() => {
+        const el = logRef.current
+        if (!el) return
+        if (logStick) el.scrollTop = el.scrollHeight
+      }, [log, logStick])
 
       const cfg = st?.config
       React.useEffect(() => {
@@ -526,7 +536,16 @@ window.__ModuleLoader__.load({
           browsing ? h('button', { 'data-ab-btn': '', disabled: busy === 'browsestop', onClick: onBrowseStop }, '停止') : null,
           h('button', { 'data-ab-btn': '', disabled: busy === 'log', onClick: onLog }, log ? '收起日志' : '看日志')),
 
-        log ? h('pre', { 'data-ab-pre': '' }, log) : null,
+        log ? h('pre', {
+          'data-ab-pre': '',
+          ref: logRef,
+          onScroll: (e) => {
+            const el = e.currentTarget
+            // 离底 24px 内算「还在看最新的」，再往上翻就说明用户在看历史，别抢
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+            setLogStick((v) => (v === atBottom ? v : atBottom))
+          },
+        }, log) : null,
       )
 
       // ── 记忆页：库路径 + 每日复盘 + 复盘模型 ──
