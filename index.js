@@ -47,11 +47,18 @@ export const Config = !z ? undefined : z.object({
   reviewPrompt: z.string().default('').extra('volatile', true),
   browseEnabled: z.boolean().default(false).extra('volatile', true),
   browseTime: z.string().default('').extra('volatile', true),
+  // 已弃用：改成「开始时间 + 时长」后逻辑不再读它，留着只为兼容老 config.json
   browseEndTime: z.string().default('').extra('volatile', true),
   browseMode: z.string().default('off').extra('volatile', true),
-  // 单次「逛」最长跑多久（分钟）。手动逛（含逛指定网站）按这个算结束时间。
+  // 自由逛单次最长（分钟）
   browseMaxMinutes: z.number().default(20).extra('volatile', true),
-  // ── B站（网站源：内置）──
+  // ── 指定网站（B站 + 自定义 MCP）：所有网站共用一套定时，到点依次逛，每个单独计时长 ──
+  siteEnabled: z.boolean().default(false).extra('volatile', true),
+  siteTime: z.string().default('').extra('volatile', true),
+  siteMaxMinutes: z.number().default(20).extra('volatile', true),
+  // B站 是否参与「指定网站」的定时逛（列表里那行的开关）
+  biliEnabled: z.boolean().default(true).extra('volatile', true),
+  // ── B站（内置网站）──
   biliPerDay: z.number().default(5).extra('volatile', true),
   biliAutoComment: z.boolean().default(false).extra('volatile', true),
   biliMentionName: z.string().default('').extra('volatile', true),
@@ -61,7 +68,7 @@ export const Config = !z ? undefined : z.object({
   biliKeywords: z.string().default('').extra('volatile', true),
   // 运行时自算：装好 venv 后记下 python 路径（不展示在设置页，只存 config.json）
   biliPythonPath: z.string().default('').extra('volatile', true),
-  // ── 自定义网站源（JSON 数组，每个是 normalizeCustomSite 认的对象）──
+  // ── 自定义网站（JSON 数组，每个是 normalizeCustomSite 认的对象）──
   customSites: z.string().default('').extra('volatile', true),
   // 复盘完顺手整理目录？默认关——先让「体检 + 整理」只在你手动点时动库
   tidyOnReview: z.boolean().default(false).extra('volatile', true),
@@ -73,6 +80,7 @@ const DEFAULTS = {
   apiBaseUrl: '', apiKey: '', model: '', reviewPrompt: '',
   browseEnabled: false, browseTime: '', browseEndTime: '', browseMode: 'off',
   browseMaxMinutes: 20,
+  siteEnabled: false, siteTime: '', siteMaxMinutes: 20, biliEnabled: true,
   biliPerDay: 5, biliAutoComment: false, biliMentionName: '', biliReplyToComments: false,
   biliDmMode: 'off', biliDmUid: 0, biliKeywords: '', biliPythonPath: '',
   customSites: '',
@@ -161,6 +169,13 @@ export function apply(ctx, config) {
       const n = Number(o.browseMaxMinutes)
       o.browseMaxMinutes = Number.isFinite(n) ? Math.max(1, Math.min(180, Math.round(n))) : 20
     }
+    if ('siteEnabled' in o) o.siteEnabled = Boolean(o.siteEnabled)
+    if ('siteTime' in o) o.siteTime = normalizeHm(o.siteTime)
+    if ('siteMaxMinutes' in o) {
+      const n = Number(o.siteMaxMinutes)
+      o.siteMaxMinutes = Number.isFinite(n) ? Math.max(1, Math.min(180, Math.round(n))) : 20
+    }
+    if ('biliEnabled' in o) o.biliEnabled = Boolean(o.biliEnabled)
     if ('biliPerDay' in o) o.biliPerDay = Math.max(0, Math.min(Number(o.biliPerDay) || 0, 50))
     if ('biliAutoComment' in o) o.biliAutoComment = Boolean(o.biliAutoComment)
     if ('biliMentionName' in o) o.biliMentionName = String(o.biliMentionName || '').slice(0, 50)
@@ -447,23 +462,48 @@ export function apply(ctx, config) {
   let browseChild = null   // 当前在跑的逛互联网子进程（到点要杀）
   let browseStartedAt = 0  // 本次逛的开始时间（epoch ms）
   let browseDeadline = 0   // 本次逛的结束时间（epoch ms，0=没在逛）
+  let siteQueue = []       // 「指定网站」到点后的排队：还要依次逛哪些网站 id
+  let siteRunKey = ''      // 已经起过的那一档（`日期 HH:mm`），防止同一档反复起
 
   // 时间口径统一在 lib/schedule.mjs（本地时间，不用 toISOString）；hmNow = 此刻的 HH:mm
   const hmNow = () => hmOf(Date.now())
-  // 到点就收尾：把 HH:mm 换成「今天这个点的 epoch」，已过点则算明天（定时窗口可能跨零点）
-  const todayAt = (hm) => {
-    const [h, m] = String(hm).split(':').map(Number)
-    const d = new Date(); d.setSeconds(0, 0); d.setHours(h, m, 0, 0)
-    if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1)
-    return d.getTime()
-  }
-  const stopBrowse = (reason) => {
+  const stopBrowse = (reason, { keepQueue = false } = {}) => {
     if (!browseChild) return false
     log(`停止逛互联网：${reason}`)
+    // 用户点「停止」= 整个队列都停（不然刚停就接着起下一个）；到点收尾只停当前这个
+    if (!keepQueue) siteQueue = []
     try { browseChild.kill() } catch { /* 忽略 */ }
     browseChild = null
     browseDeadline = 0
-    jobEnd('browse')
+    if (!siteQueue.length) jobEnd('browse')
+    return true
+  }
+
+  // ── 指定网站：哪些网站要逛 ──
+  // 列表 = B站（biliEnabled 控制）+ 所有启用的自定义站点。都在「指定网站」页里各有一行。
+  const enabledSites = () => {
+    const list = []
+    if (cfg.biliEnabled !== false) list.push(BILI_SITE)
+    for (const s of readCustomSites()) if (s.enabled !== false) list.push(s)
+    return list
+  }
+  const siteById = (id) => (id === 'bili' ? BILI_SITE : readCustomSites().find((s) => s.id === id) || null)
+  // 依次逛：一个跑完再起下一个（同时只跑一个，避免抢资源 + 抢知识库写入）
+  const startNextSite = () => {
+    if (browseChild) return false
+    const id = siteQueue.shift()
+    if (!id) return false
+    const site = siteById(id)
+    if (!site) { log(`指定网站 ${id} 已经不在了，跳过`); return startNextSite() }
+    doBrowse('site', site).then((r) => {
+      if (r?.ok) return
+      // 起不来（没登录 / 没装环境 / 找不到 cli）别把队列卡死，报一句就继续下一个
+      log(`指定网站「${site.name}」没逛成：${r?.error || '未知原因'}（跳过，继续下一个）`)
+      setTimeout(() => { if (!browseChild) startNextSite() }, 0)
+    }).catch((e) => {
+      log(`指定网站「${site.name}」异常：${e?.stack ?? e}`)
+      setTimeout(() => { if (!browseChild) startNextSite() }, 0)
+    })
     return true
   }
 
@@ -544,19 +584,17 @@ export function apply(ctx, config) {
   const doBrowse = async (why = 'schedule', site = null) => {
     refreshCfg()
     // 手动逛（点了按钮 / 让 agent 跑）不受「定时开关」限制——用户当场让逛就逛。
-    if (why !== 'manual' && !cfg.browseEnabled) return { ok: false, error: '逛互联网没开' }
+    if (why === 'schedule' && !cfg.browseEnabled) return { ok: false, error: '逛互联网没开' }
+    if (why === 'site' && !cfg.siteEnabled) return { ok: false, error: '指定网站的定时没开' }
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
     if (browseChild) return { ok: false, error: '已经在逛了（要停就先点「停止」）' }
     const cli = findDshCli()
     if (!cli) { log('逛互联网没跑：找不到 dsh cli'); return { ok: false, error: '找不到 dsh cli' } }
 
-    // 这次逛到几点结束：
-    //  · 定时逛（schedule）：用「结束时间」browseEndTime 那个钟点（没设就按时长兜底）
-    //  · 手动逛：按「单次最长」browseMaxMinutes 算，从此刻起
-    const mins = Math.max(1, Math.min(180, Math.round(Number(cfg.browseMaxMinutes) || 20)))
-    const endsAt = (why !== 'manual' && cfg.browseEndTime)
-      ? Math.min(todayAt(cfg.browseEndTime), Date.now() + mins * 60_000)   // 两个都是上限，谁先到按谁
-      : Date.now() + mins * 60_000
+    // 这次逛到几点结束：统一「从现在起 + 时长」——逛互联网用 browseMaxMinutes，
+    // 指定网站用 siteMaxMinutes（每个网站各自计时长）。
+    const mins = Math.max(1, Math.min(180, Math.round(Number(site ? cfg.siteMaxMinutes : cfg.browseMaxMinutes) || 20)))
+    const endsAt = Date.now() + mins * 60_000
     jobStart('browse')
     browseStartedAt = Date.now()
     browseDeadline = endsAt
@@ -565,7 +603,7 @@ export function apply(ctx, config) {
     const siteDir = site ? site.id : '综合'
     const mode = cfg.browseMode === 'kb' ? '贴近知识库内容做扩展学习（先看工作区里有没有知识库的说明/索引，再围绕它去逛）' : '自由逛，不做要求'
     const sitePrompt = site
-      ? `今天逛的是「${site.name}」这个网站源。你可以用 ${site.id === 'bili' ? 'bili_search / bili_subtitle / bili_comments / bili_video_info' : '这个网站提供的 MCP 工具'} 去搜、看内容，把对使用者有帮助的知识消化后记下来。`
+      ? `今天逛的是「${site.name}」这个网站。你可以用 ${site.id === 'bili' ? 'bili_search / bili_subtitle / bili_comments / bili_video_info' : '这个网站提供的 MCP 工具'} 去搜、看内容，把对使用者有帮助的知识消化后记下来。`
       : ''
     const prompt = [
       '你是「AI 大脑」的逛互联网助手。请出去逛一圈，把对使用者未来有帮助的知识记下来。',
@@ -618,8 +656,9 @@ export function apply(ctx, config) {
       browseChild = null
       browseDeadline = 0
       browseStartedAt = 0
-      jobEnd('browse')
-      log(`逛互联网结束（code=${code}）`)
+      log(`逛互联网结束（code=${code}）${siteQueue.length ? `；队列里还有 ${siteQueue.length} 个网站，接着逛` : ''}`)
+      // 队列还有 → 别收 job（进度条要继续转），由最后一个跑完再收
+      if (!siteQueue.length) jobEnd('browse')
       // 把 headless 会话产出的笔记搬进知识库 7.探索/<站点>/（宿主不受沙箱限制，能写知识库）
       let moved = 0
       try {
@@ -642,8 +681,17 @@ export function apply(ctx, config) {
       else log('逛互联网结束：本次没有新增笔记落盘（可能没逛成、或笔记写在了别处）')
       if (site) bumpState({ siteBrowsed: { ...(readState().siteBrowsed || {}), [`${site.id}:${vault.dayKey()}`]: true } })
       else bumpState({ browsed: { ...(readState().browsed || {}), [vault.dayKey()]: true } })
+      // 上一个逛完 → 接着逛队列里的下一个（指定网站到点那次会排队）
+      if (siteQueue.length) {
+        try { startNextSite() } catch (e) { log(`接着逛下一个失败：${e?.stack ?? e}`); siteQueue = []; jobEnd('browse') }
+      }
     })
-    child.on('error', (e) => { browseDeadline = 0; browseStartedAt = 0; jobEnd('browse'); log(`逛互联网起不来：${e?.message ?? e}`) })
+    child.on('error', (e) => {
+      browseChild = null; browseDeadline = 0; browseStartedAt = 0
+      log(`逛互联网起不来：${e?.message ?? e}`)
+      if (siteQueue.length) { try { startNextSite() } catch { siteQueue = []; jobEnd('browse') } }
+      else jobEnd('browse')
+    })
     return { ok: true, started: true, endsAt: browseDeadline, maxMinutes: mins }
   }
 
@@ -652,13 +700,29 @@ export function apply(ctx, config) {
       refreshCfg()
       // 到点就杀（有始有终）：不用「== 某个钟点」——定时器踩空一分钟就永远杀不掉了
       if (browseChild && browseDeadline && Date.now() >= browseDeadline) {
-        stopBrowse(`到结束时间 ${hmOf(browseDeadline)}，强制收尾`)
+        stopBrowse(`到结束时间 ${hmOf(browseDeadline)}，强制收尾`, { keepQueue: true })
       }
-      // 定时起逛
-      if (!cfg.browseEnabled || !cfg.browseTime) return
-      if (!due(cfg.browseTime, browseToday())) return
-      if (browseChild) return
-      doBrowse('schedule').catch((e) => log(`逛互联网异常：${e?.stack ?? e}`))
+      // ① 逛互联网（自由逛）：到点一次
+      if (cfg.browseEnabled && cfg.browseTime && !browseChild && !siteQueue.length) {
+        if (due(cfg.browseTime, browseToday())) {
+          doBrowse('schedule').catch((e) => log(`逛互联网异常：${e?.stack ?? e}`))
+        }
+      }
+      // ② 指定网站：到点把所有「启用且今天还没逛」的依次逛一遍（每个单独计时长）
+      if (cfg.siteEnabled && cfg.siteTime && !browseChild && !siteQueue.length) {
+        const key = `${vault.dayKey()} ${cfg.siteTime}`
+        if (siteRunKey !== key && due(cfg.siteTime, false)) {
+          const list = enabledSites().filter((s) => !siteBrowsedToday(s.id))
+          siteRunKey = key   // 这一档只起一次，失败的网站不反复重试
+          if (!list.length) {
+            log('指定网站到点了，但没有要逛的（全关了，或今天都逛过了）')
+          } else {
+            siteQueue = list.map((s) => s.id)
+            log(`指定网站到点：依次逛 ${list.map((s) => s.name).join('、')}（每个最多 ${cfg.siteMaxMinutes} 分钟）`)
+            startNextSite()
+          }
+        }
+      }
     } catch (e) { log(`逛互联网定时器出错（已兜住）：${e?.stack ?? e}`) }
   }
   try {
@@ -667,7 +731,7 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(bt), 'ai-brain: 逛互联网定时器')
   } catch (e) { log(`逛互联网定时器没起来：${e?.message ?? e}`) }
 
-  // ── 网站源（B站内置 + 自定义 MCP） ──
+  // ── 指定网站（内置 B站 + 自定义 MCP） ──
   // 铺 mcp_server.py 进家目录（内容同才跳过）
   bili.ensureHomeFiles(pluginDir, stateDir, log)
 
@@ -675,7 +739,7 @@ export function apply(ctx, config) {
   let biliMcp = null
   let biliInstalling = false
 
-  // 读自定义网站源（从 cfg.customSites 这个 JSON 字符串里解析）
+  // 读自定义网站（从 cfg.customSites 这个 JSON 字符串里解析）
   const readCustomSites = () => {
     try {
       const arr = JSON.parse(String(cfg.customSites || '').trim() || '[]')
@@ -903,9 +967,9 @@ export function apply(ctx, config) {
         vault: cfg.vaultPath || '',
         reviewEnabled: cfg.reviewEnabled, reviewTime: cfg.reviewTime,
         reviewedToday: reviewToday(), browseEnabled: cfg.browseEnabled, browseTime: cfg.browseTime,
-        browseEndTime: cfg.browseEndTime, browseMaxMinutes: cfg.browseMaxMinutes,
+        browseMaxMinutes: cfg.browseMaxMinutes,
         browseMode: cfg.browseMode, browsedToday: browseToday(), browsing: Boolean(browseChild),
-        browseStartedAt, browseDeadline,
+        browseStartedAt, browseDeadline, siteQueued: siteQueue.length,
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
         jobs: { ...jobs },
         config: { ...cfg }, // 完整配置（apiKey 也带，本机同源 fetch，设置页要回显）
@@ -937,7 +1001,7 @@ export function apply(ctx, config) {
       if (!stopped) log('点了停止，但当前没有在逛')
       return sendJson(res, 200, { ok: true, stopped })
     }
-    // ── B站 / 网站源 ──
+    // ── 指定网站（B站 + 自定义 MCP） ──
     if (sub === '/site/status' && req.method === 'GET') {
       refreshCfg()
       return sendJson(res, 200, {
@@ -945,11 +1009,15 @@ export function apply(ctx, config) {
         bili: {
           venvReady: bili.venvReadyNow(stateDir),
           loggedIn: biliHasCredential(),
+          enabled: cfg.biliEnabled !== false,
           perDay: cfg.biliPerDay, autoComment: cfg.biliAutoComment, mentionName: cfg.biliMentionName,
           replyToComments: cfg.biliReplyToComments, dmMode: cfg.biliDmMode, dmUid: cfg.biliDmUid,
           keywords: cfg.biliKeywords, installing: biliInstalling,
         },
-        customSites: readCustomSites().map((s) => ({ id: s.id, name: s.name, transport: s.transport })),
+        // 完整站点（设置页列表 + 编辑表单要用），不是只给 id/name
+        customSites: readCustomSites(),
+        sched: { enabled: cfg.siteEnabled, time: cfg.siteTime, maxMinutes: cfg.siteMaxMinutes },
+        queued: siteQueue.length,
       })
     }
     if (sub === '/site/setup' && req.method === 'POST') return sendJson(res, 200, biliSetup())
@@ -958,12 +1026,12 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       return sendJson(res, 200, await biliLoginPoll(String(body?.key || '')))
     }
-    // 逛指定网站源（POST {site:'bili'} 或 {site:'<customId>'}）
+    // 逛指定网站（POST {site:'bili'} 或 {site:'<customId>'}）
     if (sub === '/site/browse' && req.method === 'POST') {
       const body = await readBody(req)
       const id = String(body?.site || 'bili').trim()
       const site = id === 'bili' ? BILI_SITE : readCustomSites().find((s) => s.id === id)
-      if (!site) return sendJson(res, 400, { ok: false, error: `没有这个网站源：${id}` })
+      if (!site) return sendJson(res, 400, { ok: false, error: `没有这个网站：${id}` })
       if (site.id === 'bili' && !biliHasCredential()) return sendJson(res, 400, { ok: false, error: 'B站 还没登录，先去设置页扫码登录' })
       if (site.id === 'bili' && !bili.venvReadyNow(stateDir)) return sendJson(res, 400, { ok: false, error: 'B站 环境还没装，先去设置页「装 B站 环境」' })
       return sendJson(res, 200, await doBrowse('manual', site))

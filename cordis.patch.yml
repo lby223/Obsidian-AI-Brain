@@ -15,8 +15,11 @@
         browseEnabled: false
         browseTime: ""
         browseMode: "off"
-        browseEndTime: ""
         browseMaxMinutes: 20
+        siteEnabled: false
+        siteTime: ""
+        siteMaxMinutes: 20
+        biliEnabled: true
         biliPerDay: 5
         biliAutoComment: false
         biliMentionName: ""

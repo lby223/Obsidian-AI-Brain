@@ -17,8 +17,8 @@
  * 这一页分 4 个 tab（用户 m02265 嫌一页往下拉太多）：
  *   ① 概览     —— 状态徽标 + 三个手动按钮（现在复盘/现在逛/看日志）+ 进行中进度 + 日志
  *   ② 记忆     —— 知识库路径 + 每日复盘（开关/时间）+ 复盘模型三件套 + 保存
- *   ③ 逛互联网 —— 开关/逛时间/结束时间/浏览偏好
- *   ④ 网站源   —— B站（环境/登录徽标、扫码登录、逛B站、账号开关）+ 自定义网站源
+ *   ③ 逛互联网 —— 开关 / 开始时间 / 单次最长 / 浏览偏好
+ *   ④ 指定网站 —— 一个列表（B站 是其中一行）+ 新增/编辑/删除，每个网站可单独停用
  *
  * 执行类动作（复盘/逛互联网/装B站环境）加「进行中」进度反馈：
  *   - 后端 /status 返回 jobs（每类任务的 running 阶段），前端据此显示进度条/进行中徽标
@@ -78,6 +78,18 @@ window.__ModuleLoader__.load({
 [data-ab-badge]{font-size:11px;padding:2px 8px;border-radius:6px;
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
 [data-ab-badge][data-live]{color:#22c55e;}
+/* ── 网站列表：一行一个网站 ── */
+[data-ab-site]{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:8px;flex-wrap:wrap;
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.10));}
+[data-ab-site]+[data-ab-site]{margin-top:6px;}
+[data-ab-site] [data-ab-label]{display:flex;align-items:center;gap:6px;font-size:13px;}
+[data-ab-tag]{font-size:10px;padding:1px 6px;border-radius:5px;font-weight:400;
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.20));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+/* 展开的小面板（新增/编辑表单、B站 设置） */
+[data-ab-card]{margin-top:8px;padding:12px;border-radius:10px;
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.10));
+  border:1px solid var(--dsw-alias-bg-layer-3,rgba(128,128,128,.18));}
+[data-ab-card] [data-ab-label]:first-child{font-weight:600;margin-bottom:4px;}
 [data-ab-pre]{margin:10px 0 0;padding:10px 12px;border-radius:8px;max-height:320px;overflow:auto;font-size:11px;
   line-height:16px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-layer-4,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
@@ -140,6 +152,73 @@ window.__ModuleLoader__.load({
           })))
     }
 
+    // 多行输入（高级选项用）
+    function TextArea({ label, note, value, onChange, placeholder, rows = 2 }) {
+      return h('div', { 'data-ab-row': '' },
+        h('div', { 'data-ab-grow': '' },
+          h('div', { 'data-ab-label': '' }, label),
+          note ? h('div', { 'data-ab-note': '' }, note) : null,
+          h('textarea', {
+            'data-ab-input': '', rows, style: { fontFamily: 'monospace', resize: 'vertical' },
+            value: value ?? '', placeholder, onChange: (e) => onChange(e.target.value),
+          })))
+    }
+
+    // 新增 / 编辑一个「指定网站」：基础三项 + 可展开的高级选项
+    function SiteForm({ value, title, onCancel, onSave }) {
+      const src = value || {}
+      const [f, setF] = React.useState({
+        name: src.name || '', transport: src.transport || 'stdio',
+        command: src.command || '', url: src.url || '',
+        _args: Array.isArray(src.args) ? src.args.join('\n') : '',
+        _env: src.env ? Object.entries(src.env).map(([k, v]) => `${k}=${v}`).join('\n') : '',
+        _headers: src.headers ? Object.entries(src.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : '',
+        _wl: Array.isArray(src.whitelist) ? src.whitelist.join(', ') : '',
+      })
+      const [adv, setAdv] = React.useState(false)
+      const up = (k, v) => setF((o) => ({ ...o, [k]: v }))
+      const stdio = f.transport === 'stdio'
+      const lines = (s) => String(s || '').split('\n').map((x) => x.trim()).filter(Boolean)
+      const kv = (s, sep) => { const o = {}; for (const l of lines(s)) { const i = l.indexOf(sep); if (i > 0) o[l.slice(0, i).trim()] = l.slice(i + sep.length).trim() } return o }
+      const submit = () => {
+        const out = { name: f.name, transport: f.transport }
+        if (stdio) { out.command = f.command; const a = lines(f._args); if (a.length) out.args = a }
+        else out.url = f.url
+        const e = kv(f._env, '='); if (Object.keys(e).length) out.env = e
+        const hd = kv(f._headers, ':'); if (Object.keys(hd).length) out.headers = hd
+        const wl = String(f._wl || '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean); if (wl.length) out.whitelist = wl
+        onSave(out)
+      }
+      return h('div', { 'data-ab-card': '' },
+        h('div', { 'data-ab-label': '' }, title),
+        h(Field, { label: '名称', note: '列表里显示的名字，同时当它的 id（中文也行）', value: f.name, onChange: (v) => up('name', v), placeholder: '我的网站' }),
+        h('div', { 'data-ab-row': '' },
+          h('div', { 'data-ab-grow': '' },
+            h('div', { 'data-ab-label': '' }, '类型'),
+            h('div', { 'data-ab-note': '' }, '本地命令 = 我帮你把这个 MCP 起起来；网址 = 连一个已经在跑的')),
+          h('select', {
+            'data-ab-input': '', style: { width: 'auto' }, value: f.transport,
+            onChange: (ev) => up('transport', ev.target.value),
+          },
+            h('option', { value: 'stdio' }, '本地命令（stdio）'),
+            h('option', { value: 'streamable-http' }, '网址（streamable-http）'))),
+        stdio
+          ? h(Field, { label: '命令', note: '要启动的可执行文件（如 npx / python / 某个 .exe）', value: f.command, onChange: (v) => up('command', v), placeholder: 'npx' })
+          : h(Field, { label: '网址', note: 'MCP 的 http(s) 地址', value: f.url, onChange: (v) => up('url', v), placeholder: 'http://127.0.0.1:9999/mcp' }),
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', onClick: () => setAdv(!adv) }, adv ? '收起高级选项' : '高级选项（参数 / 环境变量 / 请求头 / 工具白名单）')),
+        adv
+          ? h('div', {},
+              stdio ? h(TextArea, { label: '参数', note: '一行一个。不会当 shell 命令执行，只当普通参数传过去', value: f._args, onChange: (v) => up('_args', v), placeholder: '-y\n@modelcontextprotocol/server-filesystem\nD:\\notes', rows: 3 }) : null,
+              stdio ? h(TextArea, { label: '环境变量', note: '一行一个 KEY=VALUE', value: f._env, onChange: (v) => up('_env', v), placeholder: 'API_KEY=xxx', rows: 2 }) : null,
+              stdio ? null : h(TextArea, { label: '请求头', note: '一行一个 KEY: VALUE（要认证时用）', value: f._headers, onChange: (v) => up('_headers', v), placeholder: 'Authorization: Bearer xxx', rows: 2 }),
+              h(TextArea, { label: '工具白名单', note: '留空 = 它的工具全给；填了就只给这些（逗号或换行分隔）。想稳妥就只写只读那几个', value: f._wl, onChange: (v) => up('_wl', v), placeholder: 'search, read_page', rows: 2 }))
+          : null,
+        h('div', { 'data-ab-row': '' },
+          h('button', { 'data-ab-btn': '', 'data-primary': '', onClick: submit }, '确定'),
+          h('button', { 'data-ab-btn': '', onClick: onCancel }, '取消')))
+    }
+
     // 进度条：percent 0-100；indeterminate=true 时跑不确定动画（后台任务没精确进度）
     function Progress({ label, percent, indeterminate }) {
       return h('div', { 'data-ab-row': '' },
@@ -165,6 +244,10 @@ window.__ModuleLoader__.load({
       const [biliQr, setBiliQr] = React.useState('')
       // 体检结果（点「体检」后才填）
       const [check, setCheck] = React.useState(null)
+      // 「指定网站」列表：editId = 正在编辑那一行的 id，adding = 正在新增，biliOpen = B站 那行展开设置
+      const [editId, setEditId] = React.useState('')
+      const [adding, setAdding] = React.useState(false)
+      const [biliOpen, setBiliOpen] = React.useState(false)
 
       React.useEffect(() => {
         let alive = true
@@ -216,8 +299,9 @@ window.__ModuleLoader__.load({
             model: cfg.model || '',
             reviewTime: cfg.reviewTime || '23:00',
             browseTime: cfg.browseTime || '',
-            browseEndTime: cfg.browseEndTime || '',
             browseMaxMinutes: cfg.browseMaxMinutes == null ? 20 : cfg.browseMaxMinutes,
+            siteTime: cfg.siteTime || '',
+            siteMaxMinutes: cfg.siteMaxMinutes == null ? 20 : cfg.siteMaxMinutes,
             biliMentionName: cfg.biliMentionName || '',
             customSites: cfg.customSites || '',
           })
@@ -231,7 +315,7 @@ window.__ModuleLoader__.load({
         setBusy('save')
         try {
           const p = {}
-          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseEndTime', 'browseMaxMinutes', 'biliMentionName', 'customSites']) {
+          for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseMaxMinutes', 'siteTime', 'siteMaxMinutes', 'biliMentionName', 'customSites']) {
             if (draft && k in draft) p[k] = draft[k]
           }
           const r = await jpost('/config', p)
@@ -343,6 +427,50 @@ window.__ModuleLoader__.load({
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
+      // ── 指定网站：列表的增 / 删 / 改（改的是草稿，点「保存」才落盘） ──
+      const parseSites = (s) => {
+        try { const a = JSON.parse(String(s || '').trim() || '[]'); return Array.isArray(a) ? a : null } catch { return null }
+      }
+      const writeSites = (arr) => set('customSites', arr.length ? JSON.stringify(arr, null, 2) : '')
+      const siteIdOf = (raw) => String(raw.id || '').trim() ||
+        String(raw.name || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w\u4e00-\u9fa5-]/g, '')
+      const onSiteSave = (raw, origIdx) => {
+        const cur = parseSites(draft?.customSites)
+        if (cur === null) { say('现有网站配置不是合法 JSON，先修好再说', 'warn'); return }
+        const id = siteIdOf(raw)
+        const nm = String(raw.name || '').trim()
+        if (!id || !nm) { say('得先填个名字', 'warn'); return }
+        if (id === 'bili') { say('「bili」这个名字被内置的 B站 占了，换一个', 'warn'); return }
+        if (cur.some((s, i) => i !== origIdx && (String(s.id || '') === id || String(s.name || '') === nm))) {
+          say(`已经有个叫「${nm}」的网站了，换个名字`, 'warn'); return
+        }
+        const next = { ...raw, id }
+        if (origIdx >= 0 && origIdx < cur.length) cur[origIdx] = { ...cur[origIdx], ...next }
+        else cur.push(next)
+        writeSites(cur)
+        setAdding(false); setEditId('')
+        say('改好了 —— 记得点「保存」才生效', '')
+      }
+      const onSiteDelete = (idx) => {
+        const cur = parseSites(draft?.customSites)
+        if (cur === null) { say('现有网站配置不是合法 JSON，先修好再说', 'warn'); return }
+        const s = cur[idx] || {}
+        if (!window.confirm(`把「${s.name || s.id || '这一项'}」从列表里删掉？\n\n只删这条配置，已经写进知识库的笔记不动。`)) return
+        writeSites(cur.filter((_, i) => i !== idx))
+        setEditId('')
+        say('删掉了 —— 记得点「保存」才生效', '')
+      }
+      // 单个网站的「启用」开关：即时生效（顺手把当前列表一起存了，免得草稿白改）
+      const onSiteEnable = (idx, on) => {
+        const cur = parseSites(draft?.customSites)
+        if (cur === null) { say('现有网站配置不是合法 JSON，先修好再说', 'warn'); return }
+        if (!cur[idx]) return
+        cur[idx] = { ...cur[idx], enabled: on }
+        const json = JSON.stringify(cur, null, 2)
+        set('customSites', json)
+        jpost('/config', { customSites: json }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {})
+      }
+
       if (!st || !cfg) {
         return h('div', { 'data-ab-page': '' },
           h('div', { 'data-ab-note': '' }, fails >= 3
@@ -366,7 +494,7 @@ window.__ModuleLoader__.load({
         { id: 'overview', label: '概览' },
         { id: 'memory', label: '记忆' },
         { id: 'browse', label: '逛互联网' },
-        { id: 'sites', label: '网站源' },
+        { id: 'sites', label: '指定网站' },
       ]
 
       const tabBar = h('div', { 'data-ab-tabs': '' },
@@ -461,9 +589,8 @@ window.__ModuleLoader__.load({
           on: sw('browseEnabled'),
           onChange: (v) => { jpost('/config', { browseEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
-        h(Field, { label: '逛的时间', note: 'HH:mm，到点自动开始（每天一次），留空 = 只手动逛', value: draft?.browseTime, onChange: (v) => set('browseTime', v), placeholder: '21:00' }),
-        h(Field, { label: '结束时间（定时逛用）', note: 'HH:mm，到点强制收尾（没逛完也停）；留空 = 逛完自己停。和「单次最长」谁先到按谁', value: draft?.browseEndTime, onChange: (v) => set('browseEndTime', v), placeholder: '21:30' }),
-        h(Field, { label: '单次最长（分钟）', note: '手动点「现在逛 / 逛 B站」按这个算结束时间；定时逛时它也是上限（1–180）', value: draft?.browseMaxMinutes, onChange: (v) => set('browseMaxMinutes', v), placeholder: '20' }),
+        h(Field, { label: '开始时间', note: 'HH:mm，到点自动开逛（每天一次）；留空 = 只手动逛', value: draft?.browseTime, onChange: (v) => set('browseTime', v), placeholder: '21:00' }),
+        h(Field, { label: '单次最长（分钟）', note: '从开始那一刻算，最多逛这么久（1–180），到点强制收尾', value: draft?.browseMaxMinutes, onChange: (v) => set('browseMaxMinutes', v), placeholder: '20' }),
         h('div', { 'data-ab-row': '' },
           h('div', { 'data-ab-grow': '' },
             h('div', { 'data-ab-label': '' }, '浏览偏好'),
@@ -484,53 +611,113 @@ window.__ModuleLoader__.load({
           : null,
       )
 
-      // ── 网站源页：B站 + 自定义 ──
-      const sites = h('div', {},
-        h('div', { 'data-ab-h': '' }, 'B站（内置网站源）'),
-        h('div', { 'data-ab-row': '' },
-          h('span', { 'data-ab-badge': '' }, biliVenvReady ? '环境已就绪' : '环境未装'),
-          h('span', { 'data-ab-badge': '' }, biliLoggedIn ? '已登录' : '未登录'),
-          installing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 装环境中') : null,
-          h('div', { 'data-ab-grow': '' }),
-          h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup' || installing, onClick: () => onBiliSetup(biliVenvReady) }, biliVenvReady ? '重装环境' : '装 B站 环境'),
-          biliLoggedIn
-            ? h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bilibrowse' || browsing, onClick: onBiliBrowse }, '逛 B站')
-            : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录'),
-          browsing ? h('button', { 'data-ab-btn': '', disabled: busy === 'browsestop', onClick: onBrowseStop }, '停止') : null),
-        browsing && st.browseDeadline
-          ? h('div', { 'data-ab-note': '' }, `正在逛，预计 ${hmOf(st.browseDeadline)} 收尾（${leftOf(st.browseDeadline)}）`)
-          : null,
-        biliQr
-          ? h('div', { 'data-ab-row': '' },
-              h('img', { src: '/api/ai-brain/site/qr?k=' + encodeURIComponent(biliQr), alt: '扫码登录二维码', style: { width: 160, height: 160, borderRadius: 8, background: '#fff' } }),
-              h('div', { 'data-ab-grow': '' },
-                h('div', { 'data-ab-note': '' }, '手机 B站 → 我的 → 扫一扫。扫完点「查扫码结果」。'),
-                h('button', { 'data-ab-btn': '', disabled: busy === 'bilipoll', onClick: onBiliPoll }, '查扫码结果')))
-          : null,
-        h(ToggleRow, {
-          label: '自动评论并 @',
-          note: '开着时逛到值得的视频会发评论 @ 你（默认关，账号操作手动开）',
-          on: sw('biliAutoComment'),
-          onChange: (v) => { jpost('/config', { biliAutoComment: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
-        }),
-        h(Field, { label: '要 @ 谁', note: 'B站 昵称（自动评论时 @ 这个人）', value: draft?.biliMentionName, onChange: (v) => set('biliMentionName', v), placeholder: '昵称' }),
-        h(ToggleRow, {
-          label: '回复评论',
-          note: '有人回复你那条评论时回一句（默认关）',
-          on: sw('biliReplyToComments'),
-          onChange: (v) => { jpost('/config', { biliReplyToComments: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
-        }),
+      // ── 指定网站页：一个列表（B站 也是其中一行）+ 新增入口 ──
+      const customArr = parseSites(draft?.customSites)
+      const siteNote = (s) => {
+        const how = s.transport === 'streamable-http'
+          ? `网址 ${s.url || '（没填地址）'}`
+          : `本地命令 ${s.command || '（没填命令）'}`
+        return how + (s.enabled === false ? ' · 已停用' : '')
+      }
+      const siteRow = (key, name, tag, note, swOn, swChange, actions) => h('div', { key, 'data-ab-site': '' },
+        h('div', { 'data-ab-grow': '' },
+          h('div', { 'data-ab-label': '' }, name, tag ? h('span', { 'data-ab-tag': '' }, tag) : null),
+          h('div', { 'data-ab-note': '' }, note)),
+        h(Switch, { on: swOn, onChange: swChange, disabled: !swChange }),
+        ...(actions || []))
 
-        h('div', { 'data-ab-h': '' }, '自定义网站源（MCP）'),
-        h('div', { 'data-ab-note': '' }, '贴 JSON 数组，每个是一个 MCP 网站源。只允许 stdio / streamable-http，禁止 shell 拼接。'),
-        h('textarea', {
-          'data-ab-input': '', rows: 6, style: { fontFamily: 'monospace', resize: 'vertical' },
-          value: draft?.customSites || '', placeholder: '[]',
-          onChange: (e) => set('customSites', e.target.value),
+      const sites = h('div', {},
+        h('div', { 'data-ab-h': '' }, '到点自动逛'),
+        h(ToggleRow, {
+          label: '到点依次逛下面所有启用的网站',
+          note: '每个网站单独计时长，一个逛完接着下一个；没登录/没装环境的会跳过并记一行日志',
+          on: sw('siteEnabled'),
+          onChange: (v) => { jpost('/config', { siteEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
         }),
-        h('div', { 'data-ab-note': '' }, '示例：{"id":"mysite","name":"我的站","transport":"streamable-http","url":"http://127.0.0.1:9999/mcp"} 或 stdio 用 command+args。'),
+        h(Field, { label: '开始时间', note: 'HH:mm，到点开逛（每天一次）；留空 = 只手动逛', value: draft?.siteTime, onChange: (v) => set('siteTime', v), placeholder: '01:00' }),
+        h(Field, { label: '每个网站单次最长（分钟）', note: '每个网站各自从它开始那一刻算（1–180）', value: draft?.siteMaxMinutes, onChange: (v) => set('siteMaxMinutes', v), placeholder: '20' }),
+
+        h('div', { 'data-ab-h': '' }, '网站列表'),
+        h('div', { 'data-ab-note': '' }, '开关 = 定时到点时要不要自动逛它。点「B站 设置」看它的登录和账号操作。'),
+        siteRow('bili', 'B站', '内置',
+          `${biliVenvReady ? '环境已就绪' : '环境未装'} · ${biliLoggedIn ? '已登录' : '未登录'}${installing ? ' · 装环境中…' : ''}`,
+          sw('biliEnabled'),
+          (v) => { jpost('/config', { biliEnabled: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+          [
+            h('button', { 'data-ab-btn': '', onClick: () => setBiliOpen(!biliOpen) }, biliOpen ? '收起 B站 设置' : 'B站 设置'),
+            biliLoggedIn ? h('button', { 'data-ab-btn': '', disabled: busy === 'bilibrowse' || browsing, onClick: onBiliBrowse }, '逛一下') : null,
+          ].filter(Boolean)),
+
+        biliOpen
+          ? h('div', { 'data-ab-card': '' },
+              h('div', { 'data-ab-row': '' },
+                h('span', { 'data-ab-badge': '' }, biliVenvReady ? '环境已就绪' : '环境未装'),
+                h('span', { 'data-ab-badge': '' }, biliLoggedIn ? '已登录' : '未登录'),
+                installing ? h('span', { 'data-ab-badge': '', 'data-live': '' }, '● 装环境中') : null,
+                h('div', { 'data-ab-grow': '' }),
+                h('button', { 'data-ab-btn': '', disabled: busy === 'bilisetup' || installing, onClick: () => onBiliSetup(biliVenvReady) }, biliVenvReady ? '重装环境' : '装 B站 环境'),
+                biliLoggedIn ? null : h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'bililogin', onClick: onBiliLogin }, '扫码登录'),
+                browsing ? h('button', { 'data-ab-btn': '', disabled: busy === 'browsestop', onClick: onBrowseStop }, '停止') : null),
+              biliQr
+                ? h('div', { 'data-ab-row': '' },
+                    h('img', { src: '/api/ai-brain/site/qr?k=' + encodeURIComponent(biliQr), alt: '扫码登录二维码', style: { width: 160, height: 160, borderRadius: 8, background: '#fff' } }),
+                    h('div', { 'data-ab-grow': '' },
+                      h('div', { 'data-ab-note': '' }, '手机 B站 → 我的 → 扫一扫。扫完点「查扫码结果」。'),
+                      h('button', { 'data-ab-btn': '', disabled: busy === 'bilipoll', onClick: onBiliPoll }, '查扫码结果')))
+                : null,
+              h(ToggleRow, {
+                label: '自动评论并 @', note: '开着时逛到值得的视频会发评论 @ 你（默认关）',
+                on: sw('biliAutoComment'),
+                onChange: (v) => { jpost('/config', { biliAutoComment: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+              }),
+              h(Field, { label: '要 @ 谁', note: 'B站 昵称（自动评论时 @ 这个人）', value: draft?.biliMentionName, onChange: (v) => set('biliMentionName', v), placeholder: '昵称' }),
+              h(ToggleRow, {
+                label: '回复评论', note: '有人回复你那条评论时回一句（默认关）',
+                on: sw('biliReplyToComments'),
+                onChange: (v) => { jpost('/config', { biliReplyToComments: v }).then((r) => r && r.ok && setSt((old) => ({ ...old, config: r.config }))).catch(() => {}) },
+              }))
+          : null,
+
+        customArr === null
+          ? h('div', { 'data-ab-note': '' }, '⚠️ 现在存着的网站配置不是合法 JSON，列表读不出来。点右边「清空并重来」把这段配置丢掉（知识库里的笔记不受影响），再重新加网站。')
+          : null,
+        customArr === null
+          ? h('div', { 'data-ab-row': '' },
+              h('button', { 'data-ab-btn': '', onClick: () => { if (window.confirm('把这段读不懂的网站配置清空？')) { set('customSites', ''); say('清空了 —— 记得点「保存」', '') } } }, '清空并重来'))
+          : null,
+
+        customArr && customArr.length
+          ? customArr.map((s, i) => siteRow('s' + i, s.name || s.id || '(没名字)', '', siteNote(s),
+              s.enabled !== false, (v) => onSiteEnable(i, v),
+              [
+                h('button', { 'data-ab-btn': '', onClick: () => { setEditId(String(i)); setAdding(false) } }, '编辑'),
+                h('button', { 'data-ab-btn': '', onClick: () => onSiteDelete(i) }, '删除'),
+              ]))
+          : null,
+        customArr && !customArr.length
+          ? h('div', { 'data-ab-note': '' }, '还没有自定义网站。点下面「+ 新增网站」加一个（需要那个网站自己提供 MCP）。')
+          : null,
+
+        editId !== '' && customArr && customArr[Number(editId)]
+          ? h(SiteForm, {
+              key: 'edit-' + editId, title: '编辑网站',
+              value: customArr[Number(editId)],
+              onCancel: () => setEditId(''),
+              onSave: (raw) => onSiteSave(raw, Number(editId)),
+            })
+          : null,
+        adding
+          ? h(SiteForm, {
+              key: 'new', title: '新增网站',
+              value: {}, onCancel: () => setAdding(false),
+              onSave: (raw) => onSiteSave(raw, -1),
+            })
+          : null,
+
         h('div', { 'data-ab-row': '' },
-          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存网站源')),
+          h('button', { 'data-ab-btn': '', disabled: adding, onClick: () => { setAdding(true); setEditId('') } }, '+ 新增网站'),
+          h('button', { 'data-ab-btn': '', 'data-primary': '', disabled: busy === 'save', onClick: save }, '保存')),
+        h('div', { 'data-ab-note': '' }, '时间 / 时长 / 增删改都要点「保存」才生效；开关是即时生效的。'),
       )
 
       const body = tab === 'overview' ? overview
