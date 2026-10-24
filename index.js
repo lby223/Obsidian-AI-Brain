@@ -30,6 +30,7 @@ import * as bili from './lib/bili.mjs'
 import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
 import * as tidy from './lib/tidy.mjs'
+import * as recycle from './lib/recycle.mjs'
 import { GRACE_MIN, due, dayKey, stamp, hmOf, humanNow } from './lib/schedule.mjs'
 import { mask, sameOrigin, safeYaml, safeYamlKey, filterUserEnv } from './lib/guard.mjs'
 
@@ -73,6 +74,8 @@ export const Config = !z ? undefined : z.object({
   customSites: z.string().default('').extra('volatile', true),
   // 复盘完顺手整理目录？默认关——先让「体检 + 整理」只在你手动点时动库
   tidyOnReview: z.boolean().default(false).extra('volatile', true),
+  purgeOnReview: z.boolean().default(true).extra('volatile', true),
+  recycleKeepDays: z.number().default(90).extra('volatile', true),
 })
 
 const DEFAULTS = {
@@ -86,6 +89,8 @@ const DEFAULTS = {
   biliDmMode: 'off', biliDmUid: 0, biliKeywords: '', biliPythonPath: '',
   customSites: '',
   tidyOnReview: false,
+  purgeOnReview: true,
+  recycleKeepDays: 90,
 }
 
 export function apply(ctx, config) {
@@ -187,6 +192,8 @@ export function apply(ctx, config) {
     if ('biliPythonPath' in o) o.biliPythonPath = String(o.biliPythonPath || '')
     if ('customSites' in o) o.customSites = String(o.customSites || '').slice(0, 20000)
     if ('tidyOnReview' in o) o.tidyOnReview = Boolean(o.tidyOnReview)
+    if ('purgeOnReview' in o) o.purgeOnReview = Boolean(o.purgeOnReview)
+    if ('recycleKeepDays' in o) { const n = Number(o.recycleKeepDays); o.recycleKeepDays = Number.isFinite(n) ? Math.max(7, Math.min(3650, Math.round(n))) : 90 }
     return o
   }
 
@@ -332,14 +339,53 @@ export function apply(ctx, config) {
 
   tool({
     name: 'brain_tidy',
-    description: '整理自己这个知识库（这是 AI 的记忆库，可以自己收拾）。action=scan（只读体检：编号撞车、同名嵌套目录、空文件、未来日期、散落笔记、重复笔记、索引跟不上）或 action=tidy（执行：按规则表移动/改名 + 合并重复 + 删掉空文件和逐字节重复的笔记）。有内容的笔记绝不会被删；每处改动都写进 9.归档/整理记录，可查可撤。',
+    description: '整理自己这个知识库（这是 AI 的记忆库，可以自己收拾）。action=scan（只读体检：编号撞车、同名嵌套目录、空文件、未来日期、散落笔记、重复笔记、索引跟不上）或 action=tidy（执行：按规则表移动/改名 + 合并重复 + 删掉空文件和逐字节重复的笔记）。有内容的笔记绝不会被删；每处改动都写进 9.归档/整理记录，可查可撤。一次要删超过 10 项时会先只报告不执行，确认后带 force=true 再来一次。',
     parameters: {
       action: { type: 'string', description: 'scan（只体检，默认）或 tidy（体检并把能确定的搬对位置）' },
+      force: { type: 'boolean', description: '仅当上一次 tidy 返回 needsConfirm（要删太多）时，用它确认执行' },
     },
     async execute(args) {
       const a = String(args?.action || 'scan').trim()
-      if (a === 'tidy') return doTidy()
+      if (a === 'tidy') return doTidy({ force: args?.force === true })
       return doScan()
+    },
+  })
+
+  tool({
+    name: 'brain_recycle',
+    description: '知识库回收站：AI 复盘时判断「没价值」的笔记会被搬到这里（保留若干天，默认 90 天，到期自动真删）。action=list（看看里面有什么，含原路径、理由、放了几天）、restore（把某一篇搬回原位，需要 path）、purge（立即真删到期的，或传 dryRun 只看不动手）。',
+    parameters: {
+      action: { type: 'string', description: 'list（默认）/ restore / purge' },
+      path: { type: 'string', description: 'restore 用：回收站里的相对路径（从 list 里抄，形如 9.归档/回收站/2026-10-24/2.领域/某笔记.md）' },
+      dryRun: { type: 'boolean', description: 'purge 用：只看会删什么，不动手' },
+    },
+    async execute(args) {
+      refreshCfg()
+      if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
+      const a = String(args?.action || 'list').trim()
+      if (a === 'restore') {
+        const r = recycle.restore(cfg.vaultPath, args?.path)
+        log(r.ok ? `回收站：把 ${args?.path} 搬回 ${r.to}` : `回收站还原失败：${r.error}`)
+        return r
+      }
+      if (a === 'purge') {
+        if (args?.dryRun !== false) {
+          const p = recycle.purgePreview(cfg.vaultPath)
+          return { ok: true, dryRun: true, ...p }
+        }
+        const pg = recycle.purge(cfg.vaultPath, { days: cfg.recycleKeepDays, log })
+        return { ok: true, dryRun: false, ...pg }
+      }
+      const items = recycle.listItems(cfg.vaultPath)
+      const days = (n) => {
+        const ms = /^(\d{4})-(\d{2})-(\d{2})$/.exec(n)
+        if (!ms) return null
+        return Math.floor((Date.now() - new Date(+ms[1], +ms[2] - 1, +ms[3]).getTime()) / 86_400_000)
+      }
+      return {
+        ok: true, keepDays: cfg.recycleKeepDays, total: items.length,
+        items: items.map((i) => ({ path: i.rel, original: i.origRel, day: i.day, ageDays: days(i.day) })),
+      }
     },
   })
 
@@ -351,6 +397,7 @@ export function apply(ctx, config) {
   // ── 进行中任务表（供设置页进度条用） ──
   // 每类任务一个键：review / browse / bilisetup；值为 { startedAt } 或 null（没在跑）
   const jobs = { review: null, browse: null, bilisetup: null }
+  let reviewing = false   // 复盘防重入：到点那一跳和手动点按钮是两条独立的路
   const jobStart = (k) => { jobs[k] = { startedAt: Date.now() } }
   const jobEnd = (k) => { jobs[k] = null }
 
@@ -364,29 +411,49 @@ export function apply(ctx, config) {
     if (!cfg.reviewEnabled) return { ok: false, error: '复盘没开' }
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
     if (!cfg.apiBaseUrl || !cfg.apiKey || !cfg.model) return { ok: false, error: '复盘模型没配全（apiBaseUrl / apiKey / model）' }
+    // 防重入：到点那一跳和手动点「现在复盘」是两条独立的路，都会走到这里。
+    // 没有这道闸的话，双击按钮 = 同一份草稿被提炼两遍、两路写同一批文件、
+    // 后归档的一方 rename 报 ENOENT 被静默吞掉，最后留下哪份看谁先完成。
+    if (reviewing) {
+      log(`复盘跳过：已经有一次复盘在跑（这次是 ${why}）`)
+      return { ok: false, error: '已经有一次复盘在跑，等它跑完', busy: true }
+    }
+    reviewing = true
     const today = vault.dayKey()
     log(`复盘开始（${why}）`)
     jobStart('review')
-    const r = await runReview({
-      vaultPath: cfg.vaultPath,
-      apiBaseUrl: cfg.apiBaseUrl, apiKey: cfg.apiKey, model: cfg.model, reviewPrompt: cfg.reviewPrompt,
-      log,
-    })
-    jobEnd('review')
-    if (r.ok) {
-      bumpState({ reviewed: { ...(readState().reviewed || {}), [today]: true }, lastReviewAt: stamp() })
-      log(`复盘完成：写入 ${r.notes.length} 篇${r.archived ? '，收件箱已归档' : ''}`)
-      // 复盘后顺手整理目录（默认关，见 Config.tidyOnReview）
-      if (cfg.tidyOnReview && cfg.vaultPath) {
+    try {
+      const r = await runReview({
+        vaultPath: cfg.vaultPath,
+        apiBaseUrl: cfg.apiBaseUrl, apiKey: cfg.apiKey, model: cfg.model, reviewPrompt: cfg.reviewPrompt,
+        // 让模型在复盘时判断「库里哪篇已经没价值」——命中的搬进回收站（保留 recycleKeepDays 天），不直接删
+        judge: Boolean(cfg.purgeOnReview),
+        log,
+      })
+      if (r.ok) {
+        bumpState({ reviewed: { ...(readState().reviewed || {}), [today]: true }, lastReviewAt: stamp() })
+        log(`复盘完成：写入 ${r.notes.length} 篇${r.archived ? '，收件箱已归档' : ''}${r.trashed?.length ? `，搬进回收站 ${r.trashed.length} 篇` : ''}`)
+        // 复盘后顺手整理目录（默认关，见 Config.tidyOnReview）
+        if (cfg.tidyOnReview && cfg.vaultPath) {
+          try {
+            const t = tidy.apply(cfg.vaultPath, { log })
+            if (t.needsConfirm) log(`复盘后整理：这次要删 ${t.pending.dels.length} 项，超过阈值，只报告没动手`)
+            else log(`复盘后整理：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${t.reportPath ? `（清单见 ${t.reportPath}）` : ''}`)
+          } catch (e) { log(`复盘后整理出错（已兜住）：${e?.stack ?? e}`) }
+        }
+        // 每次复盘都顺手清一次回收站里到期的（3 个月前搬进去的，真删）
         try {
-          const t = tidy.apply(cfg.vaultPath, { log })
-          log(`复盘后整理：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${t.reportPath ? `（清单见 ${t.reportPath}）` : ''}`)
-        } catch (e) { log(`复盘后整理出错（已兜住）：${e?.stack ?? e}`) }
+          const pg = recycle.purge(cfg.vaultPath, { days: cfg.recycleKeepDays, log })
+          if (pg.deletedBuckets.length) log(`回收站：清掉 ${pg.deletedFiles} 个过期文件（${pg.deletedBuckets.join('、')}），还剩 ${pg.kept} 批`)
+        } catch (e) { log(`回收站清理出错（已兜住）：${e?.stack ?? e}`) }
+      } else {
+        log(`复盘没成（${why}）：${r.error}${r.empty ? '（收件箱空，不算错）' : ''}`)
       }
-    } else {
-      log(`复盘没成（${why}）：${r.error}${r.empty ? '（收件箱空，不算错）' : ''}`)
+      return r
+    } finally {
+      reviewing = false
+      jobEnd('review')
     }
-    return r
   }
 
   // ── 功能 E：知识库体检 + 受限整理（规则驱动，不用模型） ──
@@ -405,11 +472,15 @@ export function apply(ctx, config) {
     return s
   }
 
-  const doTidy = () => {
+  const doTidy = (opts = {}) => {
     refreshCfg()
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
     log('整理开始（移动/改名/合并重复/删空文件与重复件，有内容的笔记不删）')
-    const t = tidy.apply(cfg.vaultPath, { log })
+    const t = tidy.apply(cfg.vaultPath, { log, force: opts.force === true })
+    if (t.needsConfirm) {
+      log(`整理暂停：这次要删 ${t.pending.dels.length} 项（超过阈值），只报告没动手。再点一次「整理目录」并确认才会执行。`)
+      return t
+    }
     const ix = t.index && t.index.ok ? `，探索索引${t.index.changed ? '已刷新' : '已是最新'}（${t.index.total} 篇）` : ''
     log(`整理完成：移动 ${t.moved.length} 项，删除 ${t.deleted.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${ix}`)
     return t
@@ -1031,8 +1102,46 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, text })
     }
     if (sub === '/tidy/scan' && req.method === 'GET') return sendJson(res, 200, doScan())
-    if (sub === '/tidy/apply' && req.method === 'POST') return sendJson(res, 200, doTidy())
+    if (sub === '/tidy/apply' && req.method === 'POST') {
+      // body 里的 {force:true} 表示「上次要删太多被拦下了，这次确认执行」
+      let force = false
+      try { force = (await readBody(req))?.force === true } catch { /* 没 body 就当不 force */ }
+      return sendJson(res, 200, doTidy({ force }))
+    }
     if (sub === '/review' && req.method === 'POST') return sendJson(res, 200, await doReview('manual'))
+    if (sub === '/recycle' && req.method === 'GET') {
+      refreshCfg()
+      if (!cfg.vaultPath) return sendJson(res, 200, { ok: false, error: '没配 vaultPath' })
+      const items = recycle.listItems(cfg.vaultPath)
+      const ageOf = (n) => {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(n)
+        if (!m) return null
+        return Math.floor((Date.now() - new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()) / 86_400_000)
+      }
+      const p = recycle.purgePreview(cfg.vaultPath)
+      return sendJson(res, 200, {
+        ok: true, keepDays: cfg.recycleKeepDays, total: items.length,
+        dueFiles: p.dueFiles, dueBuckets: p.dueBuckets,
+        items: items.map((i) => ({ path: i.rel, original: i.origRel, day: i.day, ageDays: ageOf(i.day) })),
+      })
+    }
+    if (sub === '/recycle/restore' && req.method === 'POST') {
+      refreshCfg()
+      if (!cfg.vaultPath) return sendJson(res, 200, { ok: false, error: '没配 vaultPath' })
+      const b = await readBody(req)
+      const r = recycle.restore(cfg.vaultPath, b?.path)
+      log(r.ok ? `回收站：把 ${b?.path} 搬回 ${r.to}` : `回收站还原失败：${r.error}`)
+      return sendJson(res, 200, r)
+    }
+    if (sub === '/recycle/purge' && req.method === 'POST') {
+      refreshCfg()
+      if (!cfg.vaultPath) return sendJson(res, 200, { ok: false, error: '没配 vaultPath' })
+      const b = await readBody(req)
+      if (b?.dryRun !== false) return sendJson(res, 200, { ok: true, dryRun: true, ...recycle.purgePreview(cfg.vaultPath) })
+      const pg = recycle.purge(cfg.vaultPath, { days: cfg.recycleKeepDays, log })
+      log(`回收站：手动清掉 ${pg.deletedFiles} 个过期文件（${pg.deletedBuckets.join('、') || '无'}）`)
+      return sendJson(res, 200, { ok: true, dryRun: false, ...pg })
+    }
     if (sub === '/browse' && req.method === 'POST') return sendJson(res, 200, await doBrowse('manual'))
     if (sub === '/browse/stop' && req.method === 'POST') {
       const stopped = stopBrowse('你在设置页点了停止')

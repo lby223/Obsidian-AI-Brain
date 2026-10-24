@@ -251,6 +251,8 @@ window.__ModuleLoader__.load({
       const [editId, setEditId] = React.useState('')
       const [adding, setAdding] = React.useState(false)
       const [biliOpen, setBiliOpen] = React.useState(false)
+      // 回收站
+      const [bin, setBin] = React.useState(null)
 
       React.useEffect(() => {
         let alive = true
@@ -380,15 +382,62 @@ window.__ModuleLoader__.load({
       }
 
       const onTidyApply = async () => {
-        if (!window.confirm('整理会做这几件事：\n\n· 把确定归错位的笔记搬到该去的目录\n· 修好「同名嵌套」「索引与目录同名」\n· 删掉空文件、以及与另一篇逐字节完全相同的重复件\n\n有内容的笔记绝不会被删。改动清单写进 9.归档/整理记录/，想撤回想查都照着来。\n\n确定现在整理吗？')) return
+        if (!window.confirm('整理会做这几件事：\n\n· 把确定归错位的笔记搬到该去的目录\n· 修好「同名嵌套」「索引与目录同名」\n· 删掉空文件、以及与另一篇逐字节完全相同的重复件\n\n有内容的笔记绝不会被删。改动清单写进 9.归档/整理记录/，想撤回想查都照着来。\n一次要删超过 10 项时会先停下来只报告，确认后才动手。\n\n确定现在整理吗？')) return
         setBusy('tidy'); say('')
         try {
           const r = await jpost('/tidy/apply', {})
+          if (r && r.ok && r.needsConfirm) {
+            // 要删的太多：先给人看清单，确认才真删
+            const list = (r.pending?.dels || []).slice(0, 12).map((d) => `· ${d.from}  (${d.why})`).join('\n')
+            const more = (r.pending?.dels || []).length > 12 ? `\n… 还有 ${(r.pending?.dels || []).length - 12} 项` : ''
+            if (!window.confirm(`这次要删 ${r.pending?.dels?.length || 0} 项，超过 10 项，我停下了没动手。\n\n${list}${more}\n\n确定要删这些吗？（只删空文件与逐字节重复的）`)) {
+              say(`已取消，什么都没动。要删的 ${r.pending?.dels?.length || 0} 项还留在原地。`, '')
+              return
+            }
+            const r2 = await jpost('/tidy/apply', { force: true })
+            if (r2 && r2.ok) {
+              say(`整理完：搬了 ${(r2.moved || []).length} 项，删了 ${(r2.deleted || []).length} 项${r2.reportPath ? `。清单：${r2.reportPath}` : ''}`, 'good')
+              setCheck(null)
+            } else say('整理没成：' + ((r2 && r2.error) || '未知原因'), 'warn')
+            return
+          }
           if (r && r.ok) {
             const n = (r.moved || []).length
-            say(`整理完：搬了 ${n} 项${(r.skipped || []).length ? `，跳过 ${(r.skipped || []).length} 项` : ''}${r.reportPath ? `。清单：${r.reportPath}` : ''}`, 'good')
+            const d = (r.deleted || []).length
+            say(`整理完：搬了 ${n} 项${d ? `，删了 ${d} 项` : ''}${(r.skipped || []).length ? `，跳过 ${(r.skipped || []).length} 项` : ''}${r.reportPath ? `。清单：${r.reportPath}` : ''}`, 'good')
             setCheck(null)
           } else say('整理没成：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      // ── 回收站 ──
+      const onBinLoad = async () => {
+        setBusy('bin')
+        try {
+          const r = await jget('/recycle')
+          if (r && r.ok) { setBin(r); say(`回收站：现存 ${(r.items || []).length} 篇` + (r.dueFiles ? `，其中 ${r.dueFiles} 篇已到期` : ''), 'good') }
+          else say('读不到回收站：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onBinPurge = async () => {
+        const n = (bin && bin.dueFiles) || 0
+        if (!n) { say('现在没有到期的东西，不用清。', 'good'); return }
+        if (!window.confirm(`会把 ${n} 篇到期的东西（放满 ${bin.keepDays} 天了）真删掉，不能恢复。\n\n只是想清点地方就点取消。确定真删吗？`)) return
+        setBusy('binpurge')
+        try {
+          const r = await jpost('/recycle/purge', { dryRun: false })
+          if (r && r.ok) { say(`清掉了 ${r.deletedFiles || 0} 个文件`, 'good'); await onBinLoad() }
+          else say('清理没成：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onBinRestore = async (path) => {
+        setBusy('binrestore')
+        try {
+          const r = await jpost('/recycle/restore', { path })
+          if (r && r.ok) { say(`搬回去了：${r.to}`, 'good'); await onBinLoad() }
+          else say('搬不回去：' + ((r && r.error) || '未知原因') + '（多半是原位已经有同名的了）', 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -513,6 +562,7 @@ window.__ModuleLoader__.load({
         { id: 'memory', label: '记忆' },
         { id: 'browse', label: '逛互联网' },
         { id: 'sites', label: '指定网站' },
+        { id: 'recycle', label: '回收站' },
       ]
 
       const tabBar = h('div', { 'data-ab-tabs': '' },
@@ -747,9 +797,33 @@ window.__ModuleLoader__.load({
         h('div', { 'data-ab-note': '' }, '时间 / 时长 / 增删改都要点「保存」才生效；开关是即时生效的。'),
       )
 
+      // ── 回收站页：AI 复盘时判断「没价值」的笔记搬到这里，保留 N 天后真删 ──
+      const binItems = (bin && bin.items) || []
+      const recycle = h('div', {},
+        h('div', { 'data-ab-h': '' }, '回收站'),
+        h('div', { 'data-ab-note': '' },
+          `复盘时我会先想一遍：库里哪篇已经被取代、过时、只剩没头没尾的草稿、或者同一件事说了几遍。判断没价值的，我搬到这里来，不直接删。保留 ${(bin && bin.keepDays) || 90} 天，到期自动真删。想留着就点「搬回去」。`),
+        h('div', { 'data-ab-row': '' },
+          h('span', { 'data-ab-badge': '' }, `现存 ${binItems.length} 篇`),
+          (bin && bin.dueFiles) ? h('span', { 'data-ab-badge': '', 'data-live': '' }, `到期 ${bin.dueFiles} 篇待清`) : null,
+          h('button', { 'data-ab-btn': '', disabled: busy === 'bin', onClick: onBinLoad }, busy === 'bin' ? '读取中…' : '刷新'),
+          h('button', {
+            'data-ab-btn': '', disabled: busy === 'binpurge',
+            onClick: onBinPurge,
+          }, busy === 'binpurge' ? '清理中…' : '清理到期的')),
+        binItems.length
+          ? h('div', { 'data-ab-issues': '' }, binItems.map((it) => h('div', { 'data-ab-issue': '', key: it.path, 'data-level': (it.ageDays != null && it.ageDays >= ((bin && bin.keepDays) || 90) - 7) ? 'error' : 'warn' },
+              h('span', {}, `${it.original}　`),
+              h('span', { 'data-ab-note': '', style: { display: 'inline' } }, `放了 ${it.ageDays == null ? '?' : it.ageDays} 天`),
+              h('button', { 'data-ab-btn': '', style: { marginLeft: '8px' }, disabled: busy === 'binrestore', onClick: () => onBinRestore(it.path) }, '搬回去'))))
+          : h('div', { 'data-ab-note': '' }, '回收站是空的 —— 这说明库里没有我判断该清掉的东西，正常。'),
+        h('div', { 'data-ab-note': '' }, '被搬到这里的东西会在 9.归档/回收站/<日期>/ 下留一份原文件 + 一份清单（写了为什么）。清理是每天复盘后顺手做的。'),
+      )
+
       const body = tab === 'overview' ? overview
         : tab === 'memory' ? memory
         : tab === 'browse' ? browse
+        : tab === 'recycle' ? recycle
         : sites
 
       return h('div', { 'data-ab-page': '' }, tabBar, msgEl, body)
