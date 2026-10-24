@@ -17,7 +17,7 @@ const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -31,6 +31,7 @@ import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
 import * as tidy from './lib/tidy.mjs'
 import { GRACE_MIN, due, dayKey, stamp, hmOf, humanNow } from './lib/schedule.mjs'
+import { mask, sameOrigin, safeYaml, safeYamlKey, filterUserEnv } from './lib/guard.mjs'
 
 export const name = 'ai-brain'
 export const inject = ['tools', 'settings', 'webServer']
@@ -156,7 +157,7 @@ export function apply(ctx, config) {
     if ('vaultPath' in o) o.vaultPath = String(o.vaultPath || '').trim()
     if ('rulesExtra' in o) o.rulesExtra = String(o.rulesExtra || '').slice(0, 8000)
     if ('reviewEnabled' in o) o.reviewEnabled = Boolean(o.reviewEnabled)
-    if ('reviewTime' in o) o.reviewTime = /^\d{1,2}:\d{2}$/.test(String(o.reviewTime || '')) ? String(o.reviewTime) : '23:00'
+    if ('reviewTime' in o) o.reviewTime = normalizeHm(o.reviewTime) || '23:00'
     if ('apiBaseUrl' in o) o.apiBaseUrl = String(o.apiBaseUrl || '').trim()
     if ('apiKey' in o) o.apiKey = String(o.apiKey || '').trim()
     if ('model' in o) o.model = String(o.model || '').trim()
@@ -509,6 +510,7 @@ export function apply(ctx, config) {
   }
 
   // 写 headless-overlay.yml：把某个网站的 MCP 挂进 headless 会话 + 打开 credentials（headless 默认禁）
+  // 🔒 所有来自用户/网络的值一律走 safeYaml（双引号标量），不再裸拼——值里带换行也逸不出新键。
   const ensureOverlay = (site) => {
     const out = join(stateDir, 'headless-overlay.yml')
     const lines = [
@@ -526,9 +528,9 @@ export function apply(ctx, config) {
       if (m?.provider && m?.model) {
         lines.push(`- id: agent-default-model`)
         lines.push(`  config:`)
-        lines.push(`    provider: ${m.provider}`)
-        lines.push(`    model: ${m.model}`)
-        if (m.reasoningEffort) lines.push(`    reasoningEffort: ${m.reasoningEffort}`)
+        lines.push(`    provider: ${safeYaml(m.provider)}`)
+        lines.push(`    model: ${safeYaml(m.model)}`)
+        if (m.reasoningEffort) lines.push(`    reasoningEffort: ${safeYaml(m.reasoningEffort)}`)
       }
     } catch { /* 拿不到就跳过 */ }
 
@@ -540,11 +542,11 @@ export function apply(ctx, config) {
       lines.push(`      config:`)
       lines.push(`        serverName: bili-duty`)
       lines.push(`        transport: stdio`)
-      lines.push(`        command: ${py}`)
+      lines.push(`        command: ${safeYaml(py)}`)
       lines.push(`        args:`)
-      lines.push(`          - ${join(stateDir, 'mcp_server.py')}`)
+      lines.push(`          - ${safeYaml(join(stateDir, 'mcp_server.py'))}`)
       lines.push(`        env:`)
-      lines.push(`          BILI_MCP_TOOLS: ${biliWhitelist().join(',')}`)
+      lines.push(`          BILI_MCP_TOOLS: ${safeYaml(biliWhitelist().join(','))}`)
       lines.push(`          PYTHONUTF8: '1'`)
       lines.push(`        failOnStartupError: false`)
     } else if (site?.transport === 'stdio') {
@@ -552,16 +554,17 @@ export function apply(ctx, config) {
       lines.push(`    - id: mcp-site-${site.id}`)
       lines.push(`      name: '@deepseek-ai/dsh-mcp-client'`)
       lines.push(`      config:`)
-      lines.push(`        serverName: ${site.id}`)
+      lines.push(`        serverName: ${safeYaml(site.id)}`)
       lines.push(`        transport: stdio`)
-      lines.push(`        command: ${site.command}`)
+      lines.push(`        command: ${safeYaml(site.command)}`)
       if (Array.isArray(site.args) && site.args.length) {
         lines.push(`        args:`)
-        for (const a of site.args) lines.push(`          - ${a}`)
+        for (const a of site.args) lines.push(`          - ${safeYaml(a)}`)
       }
-      if (site.env) {
+      const env = filterUserEnv(site.env)
+      if (Object.keys(env).length) {
         lines.push(`        env:`)
-        for (const [k, v] of Object.entries(site.env)) lines.push(`          ${k}: ${v}`)
+        for (const [k, v] of Object.entries(env)) lines.push(`          ${safeYamlKey(k)}: ${safeYaml(v)}`)
       }
       lines.push(`        failOnStartupError: false`)
     } else if (site?.transport === 'streamable-http') {
@@ -569,16 +572,20 @@ export function apply(ctx, config) {
       lines.push(`    - id: mcp-site-${site.id}`)
       lines.push(`      name: '@deepseek-ai/dsh-mcp-client'`)
       lines.push(`      config:`)
-      lines.push(`        serverName: ${site.id}`)
+      lines.push(`        serverName: ${safeYaml(site.id)}`)
       lines.push(`        transport: streamable-http`)
-      lines.push(`        url: ${site.url}`)
-      if (site.headers) {
+      lines.push(`        url: ${safeYaml(site.url)}`)
+      if (site.headers && typeof site.headers === 'object' && Object.keys(site.headers).length) {
         lines.push(`        headers:`)
-        for (const [k, v] of Object.entries(site.headers)) lines.push(`          ${k}: ${v}`)
+        for (const [k, v] of Object.entries(site.headers)) lines.push(`          ${safeYamlKey(k)}: ${safeYaml(v)}`)
       }
       lines.push(`        failOnStartupError: false`)
     }
-    try { writeFileSync(out, lines.join('\n') + '\n', 'utf8') } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`) }
+    // 这个文件里可能有 Authorization 头等凭证 —— 尽量只给本人读（Windows 上 ignore 掉别人的继承权限）
+    try {
+      writeFileSync(out, lines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 })
+      if (process.platform === 'win32') { try { chmodSync(out, 0o600) } catch { /* 忽略 */ } }
+    } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`) }
     return out
   }
 
@@ -873,17 +880,21 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bili_reply',
-    description: '在视频下发评论（或回复某条评论）。🔴 安全闸：设置页「自动评论并 @」默认关；关着时拒绝——除非本人当场让你发（传 force: true）。',
+    description: '在视频下发评论（或回复某条评论）。🔴 安全闸：设置页「自动评论并 @」默认关，关着时这个工具直接拒绝——要发评论请让本人在设置页把开关打开。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
-      force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
+      // ⚠️ 这里原来有个 `force` 参数，模型自己传 true 就能越过「自动评论关着」的闸 ——
+      // 等于让被约束的一方自己决定要不要受约束。已去掉：开关只由人在设置页控制。
       const commentOn = Boolean(cfg.biliAutoComment && cfg.biliMentionName)
-      if (!commentOn && !args.force) {
-        return { ok: false, blocked: true, hint: '要发评论得同时满足：设置里开「自动评论并 @」且填了「要 @ 谁」；或本人当场让你发时传 force: true。' }
+      if (!commentOn) {
+        return {
+          ok: false, blocked: true,
+          hint: '发评论需要本人在「AI 大脑」设置页的「指定网站 → B站」里打开「自动评论并 @」并填「要 @ 谁」。在那之前不要发，也不要换别的工具绕。',
+        }
       }
       try { return await biliCall('bili_reply', { bvid: String(args.bvid ?? ''), text: String(args.text ?? ''), rpid: Number(args.rpid) || 0 }) }
       catch (e) { return { ok: false, error: String(e?.message ?? e) } }
@@ -949,10 +960,22 @@ export function apply(ctx, config) {
       res.end(body)
     } catch { try { res.end('{}') } catch { /* 忽略 */ } }
   }
+  // 请求体上限：配置整份才几十 KB，1 MB 已经很宽松了。
+  // 原来是无上限累加（data += c），本机任何程序 POST 一大坨就能把宿主内存吃光。
+  const MAX_BODY = 1024 * 1024
   const readBody = (req) => new Promise((resolve) => {
     let data = ''
-    req.on('data', (c) => { data += c })
-    req.on('end', () => { try { resolve(JSON.parse(data || '{}')) } catch { resolve({}) } })
+    let tooBig = false
+    req.on('data', (c) => {
+      if (tooBig) return
+      data += c
+      if (data.length > MAX_BODY) { tooBig = true; data = ''; try { req.destroy() } catch { /* 忽略 */ } }
+    })
+    req.on('end', () => {
+      if (tooBig) return resolve({})
+      try { resolve(JSON.parse(data || '{}')) } catch { resolve({}) }
+    })
+    req.on('error', () => resolve({}))
   })
 
   const handle = async (req, res, url) => {
@@ -960,6 +983,13 @@ export function apply(ctx, config) {
     const prefix = '/api/ai-brain'
     if (!path.startsWith(prefix)) return sendJson(res, 404, { ok: false, error: 'not found' })
     const sub = path.slice(prefix.length) || '/'
+
+    // 来源校验：挡掉「本机其它网页偷偷 fetch 这个端口」。
+    // 只拦带跨站 Origin / Sec-Fetch-Site: cross-site 的请求；命令行和本机进程没有 Origin，照常放行。
+    if (!sameOrigin(req)) {
+      log(`拒绝了一个跨站请求：${req.method} ${sub}（Origin=${req.headers?.origin || '-'}）`)
+      return sendJson(res, 403, { ok: false, error: 'cross-site request rejected' })
+    }
 
     if (sub === '/status' && req.method === 'GET') {
       refreshCfg()
@@ -973,20 +1003,22 @@ export function apply(ctx, config) {
         browseStartedAt, browseDeadline, siteQueued: siteQueue.length,
         modelConfigured: Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model),
         jobs: { ...jobs },
-        config: { ...cfg }, // 完整配置（apiKey 也带，本机同源 fetch，设置页要回显）
+        // 完整配置，但 apiKey 之类的**不回明文**（设置页只需要知道"配了没有"）
+        config: mask({ ...cfg }),
       })
     }
     if (sub === '/config' && req.method === 'GET') {
       refreshCfg()
-      return sendJson(res, 200, { ok: true, config: { ...cfg }, home: stateDir })
+      return sendJson(res, 200, { ok: true, config: mask({ ...cfg }), home: stateDir })
     }
     if (sub === '/config' && req.method === 'POST') {
       const body = await readBody(req)
       const patch = {}
       for (const k of Object.keys(DEFAULTS)) if (k in body) patch[k] = body[k]
       const clean = persistCfg(patch)
-      log(`设置已更新：${JSON.stringify(clean)}`)
-      return sendJson(res, 200, { ok: true, config: { ...cfg } })
+      // 日志里也不能留明文 key（原来这行把整份配置含 apiKey 都写进了 brain.log，而 /log 又会把它吐回前端）
+      log(`设置已更新：${JSON.stringify(mask(clean))}`)
+      return sendJson(res, 200, { ok: true, config: mask({ ...cfg }) })
     }
     if (sub === '/log' && req.method === 'GET') {
       let text = ''

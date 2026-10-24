@@ -300,12 +300,15 @@ window.__ModuleLoader__.load({
       }, [log, logStick])
 
       const cfg = st?.config
+      // 后端不再回明文 apiKey（只回「已设置（N 位，不回显）」这种占位），
+      // 所以草稿里 apiKey 初值留空：用户不填 = 不动原来的；填了才提交。
+      const isMasked = (v) => typeof v === 'string' && v.startsWith('已设置（')
       React.useEffect(() => {
         if (cfg && draft === null) {
           setDraft({
             vaultPath: cfg.vaultPath || '',
             apiBaseUrl: cfg.apiBaseUrl || '',
-            apiKey: cfg.apiKey || '',
+            apiKey: isMasked(cfg.apiKey) ? '' : (cfg.apiKey || ''),
             model: cfg.model || '',
             reviewTime: cfg.reviewTime || '23:00',
             browseTime: cfg.browseTime || '',
@@ -328,6 +331,8 @@ window.__ModuleLoader__.load({
           for (const k of ['vaultPath', 'apiBaseUrl', 'apiKey', 'model', 'reviewTime', 'browseTime', 'browseMaxMinutes', 'siteTime', 'siteMaxMinutes', 'biliMentionName', 'customSites']) {
             if (draft && k in draft) p[k] = draft[k]
           }
+          // apiKey 留空 = 不改原来的（别把空串或脱敏占位写回去，把真 key 覆盖掉）
+          if (!p.apiKey || isMasked(p.apiKey)) delete p.apiKey
           const r = await jpost('/config', p)
           if (r && r.ok) { say('已保存', 'good'); setSt((old) => ({ ...old, config: r.config })) }
           else say('没保存成：' + ((r && r.error) || '未知原因'), 'warn')
@@ -489,7 +494,10 @@ window.__ModuleLoader__.load({
       }
 
       const sw = (k) => Boolean(cfg[k])
-      const modelOk = Boolean(cfg.apiBaseUrl && cfg.apiKey && cfg.model)
+      // 用后端算好的 modelConfigured（它拿的是真 apiKey）；前端拿到的是脱敏占位，别拿它判真伪
+      const modelOk = st?.modelConfigured != null
+        ? Boolean(st.modelConfigured)
+        : Boolean(cfg?.apiBaseUrl && cfg?.apiKey && cfg?.model)
       const biliVenvReady = Boolean(biliSt && biliSt.bili && biliSt.bili.venvReady)
       const biliLoggedIn = Boolean(biliSt && biliSt.bili && biliSt.bili.loggedIn)
       const biliInstalling = Boolean(biliSt && biliSt.bili && biliSt.bili.installing)
@@ -573,7 +581,7 @@ window.__ModuleLoader__.load({
 
         h('div', { 'data-ab-h': '' }, '复盘模型（OpenAI 兼容接口）'),
         h(Field, { label: 'apiBaseUrl', note: '如 https://api.deepseek.com/v1', value: draft?.apiBaseUrl, onChange: (v) => set('apiBaseUrl', v), placeholder: 'https://api.deepseek.com/v1' }),
-        h(Field, { label: 'apiKey', note: '密钥，只存本机 config.json', value: draft?.apiKey, onChange: (v) => set('apiKey', v), placeholder: 'sk-...' }),
+        h(Field, { label: 'apiKey', note: '密钥，只存本机 config.json。后端不回显，留空 = 不改原来的；要换就整串重填', value: draft?.apiKey, onChange: (v) => set('apiKey', v), placeholder: cfg && isMasked(cfg.apiKey) ? cfg.apiKey : 'sk-...' }),
         h(Field, { label: 'model', note: '如 deepseek-chat', value: draft?.model, onChange: (v) => set('model', v), placeholder: 'deepseek-chat' }),
 
         h('div', { 'data-ab-h': '' }, '知识库体检 / 整理'),
