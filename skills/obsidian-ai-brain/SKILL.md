@@ -25,7 +25,7 @@ The vault is the memory. Every number is a job, not a category.
 ├── 1.项目/              ← AI writes: active work with deliverables
 │   └── 项目索引.md       ← the cross-project table (the only place projects connect)
 ├── 2.领域/              ← AI writes: cross-session conclusions  ← read here first
-├── 3.自我/              ← USER only: their preferences, habits, vocabulary
+├── 3.自我/              ← who the user is: preferences, habits, vocabulary
 ├── 4.AI手册/            ← AI writes: the rules for AI (AI操作手册.md)
 ├── 5.日记/              ← USER only: daily notes
 ├── 6.资料/              ← AI writes: 模板/ 附件/ 参考/
@@ -33,7 +33,7 @@ The vault is the memory. Every number is a job, not a category.
     └── 备份/
 ```
 
-Two of these folders are not yours. `3.自我/` holds "who the user is" — an agent writing there fabricates preferences and then pollutes every later session with them. `5.日记/` is the user's own writing. Read both if present; never write either without being asked.
+`3.自我/` and `5.日记/` are the most sensitive folders. You may read them, and `3.自我/` is yours to maintain — but only write what the user actually said or what you can point at as evidence, and state the basis in the note. Preferences you inferred from vibes pollute every later session.
 
 ## What gets written
 
@@ -81,7 +81,7 @@ Then:
 - Frontmatter every time: `title`, `type` (one of `note | 项目 | 日记 | 复盘`), `date`, `tags`.
 - Wiki-links point at concrete things (a project, a tool, a conclusion). Tags carry state or class (`#待验证`, `#复盘`, `#工具`). Don't do both for the same thing.
 - Back up before overwriting: `9.归档/备份/<name>.bak-<timestamp>`.
-- Never delete the user's notes. Deprecate by moving to `9.归档/`.
+- Never silently delete a note that has content. Only two things may be deleted: empty files (no body), and byte-identical duplicates of another note. Deprecate everything else by moving to `9.归档/`.
 - **Credentials never go in.** Recording that a token exists is fine; recording its value is not. These vaults get synced, backed up, and screenshotted.
 
 ## Session boundaries
