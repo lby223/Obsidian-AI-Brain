@@ -26,6 +26,9 @@ import { homedir } from 'node:os'
 import { RULES, buildRules } from './lib/rules.mjs'
 import * as vault from './lib/vault.mjs'
 import { runReview } from './lib/review.mjs'
+import * as query from './lib/query.mjs'
+import { searchWide } from './lib/query.mjs'
+import { normalizeDir } from './lib/review.mjs'
 import * as bili from './lib/bili.mjs'
 import * as login from './lib/login.mjs'
 import { BILI_SITE, normalizeCustomSite } from './lib/sites.mjs'
@@ -288,13 +291,80 @@ export function apply(ctx, config) {
 
   tool({
     name: 'brain_search',
-    description: '在知识库里搜索笔记内容（关键词，大小写不敏感）。返回匹配的路径、行号、摘要。写新笔记前先搜一下，别重复。',
-    parameters: { query: { type: 'string', description: '要搜的关键词' } },
+    description: '在知识库里搜。**故意做得能容错**：整串搜不到会自动拆词、按二元组切中文、最后才用同义词扩展——所以「说人话」也能搜到，不怕措辞和笔记标题对不上。返回按相关度排序的笔记（每篇最多 3 行上下文），并附一句 crossProject 提醒。**回答任何关于本机、历史决策、踩过的坑的问题之前，先调它。**',
+    parameters: {
+      query: {
+        type: 'string',
+        description: '要搜的东西，可以是整句人话（如「为什么昨天那个自动任务没跑」），也可以是关键词（如「EACCES 权限」「acp-proxy 502」）',
+      },
+      exact: { type: 'boolean', description: '只做原样整串匹配，不拆词不扩展（默认 false）' },
+    },
     async execute(args) {
       const q = String(args?.query || '').trim()
       if (!q) return { ok: false, error: 'query 不能为空' }
       const v = vp(); if (!v) return { ok: false, error: '还没配置 vaultPath（去插件设置页填）' }
-      return { ok: true, query: q, results: vault.searchNotes(v, q) }
+      const search = (s) => vault.searchNotes(v, s)
+      if (args?.exact) {
+        const results = search(q).slice(0, 40)
+        return { ok: true, query: q, exact: true, total: results.length, results }
+      }
+      const wide = searchWide(search, q, { limit: 40 })
+      const notes = query.collapse(wide.results, 3).slice(0, 12)
+      return {
+        ok: true,
+        query: q,
+        hitNotes: notes.length,
+        widened: wide.widened,
+        usedQueries: wide.usedQueries.slice(0, 10),
+        notes,
+        hint: notes.length
+          ? '看 notes[].path，需要细读就 brain_read 那篇。'
+          : '一条都没搜到。换个说法再试一次（本机报错原文、工具名、文件名往往比「自然语言」好搜），或 brain_list 看目录。',
+        crossProject: '这个库跨项目共用：这里翻到的东西，很可能另一个项目里已经踩过同一个坑。',
+      }
+    },
+  })
+
+  tool({
+    name: 'brain_remember',
+    description: '把一条「以后会用得上」的结论直接写成正式笔记（比 brain_capture 更重）。会自动补 frontmatter、写进你指定的目录（不在白名单就落到 2.领域）、并在当天收件箱留一行索引。适合已经想清楚、不需要等复盘的结论；随手草稿请用 brain_capture。',
+    parameters: {
+      title: { type: 'string', description: '标题 = 以后你会怎么搜它（例：定时任务到点判断-小时不补零与分钟字符串相等）' },
+      body: { type: 'string', description: '正文 Markdown。第一段请写 `> **一句话结论**：…`，方便我下次只看前几行就判断要不要读。' },
+      dir: { type: 'string', description: '相对目录，如 2.领域/踩坑、7.探索/综合、1.项目/某项目。不在白名单会落 2.领域。' },
+      tags: { type: 'string', description: '可选，逗号分隔，如「踩坑,powershell」' },
+    },
+    async execute(args) {
+      const v = vp(); if (!v) return { ok: false, error: '还没配置 vaultPath' }
+      const title = String(args?.title || '').trim()
+      if (!title) return { ok: false, error: 'title 不能为空' }
+      const nd = normalizeDir(args?.dir || '')
+      const rel = `${nd.dir}/${title.replace(/[\\/:*?"<>|]/g, '-')}.md`
+      const tags = String(args?.tags || '').split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+      const body = String(args?.body || '').trim() || '> **一句话结论**：（还没写）'
+      const fm = [
+        '---',
+        `title: ${title}`,
+        'type: note',
+        `date: ${dayKey()}`,
+        `tags: [${tags.join(', ')}]`,
+        '---',
+        '',
+        `# ${title}`,
+        '',
+        body,
+        '',
+      ].join('\n')
+      const existed = vault.readNote(v, rel) !== null
+      const w = vault.writeNote(v, rel, fm)
+      if (!w.ok) return { ok: false, error: w.error || '写入失败', path: rel }
+      log(`写笔记：${rel}${existed ? '（覆盖）' : ''}`)
+      return {
+        ok: true,
+        path: rel,
+        overwritten: existed,
+        dirFallback: nd.fell ? `目录「${String(args?.dir || '')}」不在白名单，已落到 ${nd.dir}` : undefined,
+      }
     },
   })
 
