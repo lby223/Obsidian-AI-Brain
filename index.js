@@ -402,9 +402,10 @@ export function apply(ctx, config) {
   const doTidy = () => {
     refreshCfg()
     if (!cfg.vaultPath) return { ok: false, error: '没配 vaultPath' }
-    log('整理开始（只移动/改名，不删文件）')
+    log('整理开始（只移动/改名/刷新索引，不删文件）')
     const t = tidy.apply(cfg.vaultPath, { log })
-    log(`整理完成：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}`)
+    const ix = t.index && t.index.ok ? `，探索索引${t.index.changed ? '已刷新' : '已是最新'}（${t.index.total} 篇）` : ''
+    log(`整理完成：移动 ${t.moved.length} 项，跳过 ${t.skipped.length} 项${t.failed.length ? `，失败 ${t.failed.length} 项` : ''}${ix}`)
     return t
   }
 
