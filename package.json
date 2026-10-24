@@ -1,6 +1,6 @@
 {
   "name": "dsh-ai-brain",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "给 AI 一个跨会话的持久记忆，背后是一个 Obsidian 库（Markdown 文件夹）。会话尾巴抢救 + 每日定时复盘 + 可选 AI 逛互联网 + 自己整理大脑。",
   "type": "module",
   "main": "index.js",
